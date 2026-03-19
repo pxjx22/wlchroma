@@ -112,11 +112,14 @@ pub const App = struct {
                 if (s.egl_surface) |*egl_surf| {
                     if (egl_surf.makeCurrent(ctx)) {
                         self.shader = ShaderProgram.init() catch |err| blk: {
-                            std.debug.print("ShaderProgram.init failed: {}\n", .{err});
+                            std.debug.print("FATAL: ShaderProgram.init failed: {} -- " ++
+                                "EGL surfaces will render black until shader is fixed\n", .{err});
                             break :blk null;
                         };
-                        // Shader pointer is passed to renderTick per-frame,
-                        // not stored on SurfaceState, to avoid dangling borrows.
+                        // Bind invariant GL state once -- program, VBO, vertex
+                        // layout. Persists across frames for this single-program
+                        // setup. draw() only uploads per-frame uniforms.
+                        if (self.shader) |*sh| sh.bind();
                     }
                     break;
                 }

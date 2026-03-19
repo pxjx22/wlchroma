@@ -84,8 +84,11 @@ pub const ShaderProgram = struct {
         };
     }
 
-    /// Draw the fullscreen quad using the currently active EGL context.
-    pub fn draw(self: *const ShaderProgram, r: f32, g: f32, b: f32) void {
+    /// Bind invariant GL state: program, VBO, and vertex attribute layout.
+    /// Call once after the EGL context is made current (or after a program
+    /// switch). This is a single-program single-VBO setup, so the bound
+    /// state persists across frames until the context is destroyed.
+    pub fn bind(self: *const ShaderProgram) void {
         c.glUseProgram(self.program);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
@@ -97,10 +100,13 @@ pub const ShaderProgram = struct {
             0, // stride = 0 (tightly packed)
             @as(?*const anyopaque, null), // offset into VBO
         );
+    }
+
+    /// Draw the fullscreen quad. Only uploads the per-frame uniform and
+    /// issues the draw call. Assumes bind() was called once beforehand.
+    pub fn draw(self: *const ShaderProgram, r: f32, g: f32, b: f32) void {
         c.glUniform3f(self.u_color_loc, r, g, b);
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
-        c.glDisableVertexAttribArray(self.a_pos_loc);
-        c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
     }
 
     pub fn deinit(self: *ShaderProgram) void {

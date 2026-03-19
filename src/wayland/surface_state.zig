@@ -120,9 +120,16 @@ pub const SurfaceState = struct {
             const ctx = self.egl_ctx.?;
             if (!egl_surf.makeCurrent(ctx)) return;
 
-            // TODO(Phase 4): call renderer.maybeAdvance + pass uniforms to shader
+            // Advance shared renderer state every frame so that Phase 4
+            // can read renderer.frames / last_advance_ms as animation time
+            // without a stale-state jump on first use.
+            // TODO(Phase 4): use frame callback timestamp for VRR-aligned animation
+            // instead of a fresh clock_gettime.
+            const now_ms = getMonotonicMs();
+            self.renderer.maybeAdvance(now_ms);
+
             if (shader) |sh| {
-                c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
+                // glViewport is set once at configure / resize, not per-frame.
                 sh.draw(0.2, 0.4, 0.8); // solid blue -- visible proof shader pipeline works
             } else {
                 // Shader not ready yet, keep the black clear as fallback
@@ -243,6 +250,10 @@ fn layerSurfaceConfigure(
         if (self.egl_surface) |*existing| {
             // Resize the existing EGL window -- no need to recreate EGLSurface
             existing.resize(pw, ph);
+            // Update viewport to match new dimensions. Context must be current.
+            if (existing.makeCurrent(ctx)) {
+                c.glViewport(0, 0, @intCast(pw), @intCast(ph));
+            }
         } else {
             // First configure: create the EGL surface
             self.egl_surface = EglSurface.create(ctx, wl_surface_egl, pw, ph) catch |err| blk: {
@@ -252,6 +263,8 @@ fn layerSurfaceConfigure(
             if (self.egl_surface) |*egl_surf| {
                 if (egl_surf.makeCurrent(ctx)) {
                     _ = c.eglSwapInterval(ctx.display, 0);
+                    // Set viewport once at creation; updated on resize above.
+                    c.glViewport(0, 0, @intCast(pw), @intCast(ph));
                 }
             }
         }
@@ -353,6 +366,14 @@ fn layerSurfaceConfigure(
 /// Frame callback handler. The compositor calls this when the previously
 /// committed buffer has been presented. We only clear the flag here --
 /// actual rendering is driven by the timerfd in the main loop.
+///
+/// Phase 4 pacing note: `time_ms` is the compositor's presentation
+/// timestamp (CLOCK_MONOTONIC). For VRR/adaptive-sync aligned animation,
+/// this could replace getMonotonicMs() as the time source for
+/// renderer.maybeAdvance(). Using the compositor timestamp gives
+/// presentation-aligned animation; using the monotonic clock gives
+/// fixed-rate animation independent of compositor timing. Decision
+/// deferred to Phase 4.
 fn frameCallbackDone(
     data: ?*anyopaque,
     callback: ?*c.wl_callback,

@@ -41,7 +41,13 @@ pub const EglSurface = struct {
     }
 
     /// Make this surface current for GLES rendering on the calling thread.
+    /// Skips the kernel-crossing eglMakeCurrent call if this surface is
+    /// already bound (common case: single output, consecutive frames).
+    /// For multi-output setups, context switching still happens when
+    /// iterating to a different surface -- this is required and correct.
     pub fn makeCurrent(self: *EglSurface, ctx: *const EglContext) bool {
+        // eglGetCurrentSurface is a cheap thread-local query, no kernel crossing.
+        if (c.eglGetCurrentSurface(c.EGL_DRAW) == self.egl_surface) return true;
         return c.eglMakeCurrent(ctx.display, self.egl_surface, self.egl_surface, ctx.context) == c.EGL_TRUE;
     }
 
