@@ -69,6 +69,7 @@ pub const App = struct {
                 out,
                 self.display,
                 &self.renderer,
+                &self.running,
             );
             try self.surfaces.append(self.allocator, surface_state);
         }

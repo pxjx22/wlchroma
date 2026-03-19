@@ -22,6 +22,7 @@ pub const SurfaceState = struct {
     display: *c.wl_display,
     frame_callback: ?*c.wl_callback,
     last_frame_ms: u32,
+    running: *bool,
 
     const layer_surface_listener = c.zwlr_layer_surface_v1_listener{
         .configure = layerSurfaceConfigure,
@@ -42,6 +43,7 @@ pub const SurfaceState = struct {
         out: *const OutputInfo,
         display: *c.wl_display,
         renderer: *ColormixRenderer,
+        running: *bool,
     ) !SurfaceState {
         const layer_surf = try LayerSurface.create(compositor, layer_shell, out.wl_output, "wallpaper");
 
@@ -60,6 +62,7 @@ pub const SurfaceState = struct {
             .display = display,
             .frame_callback = null,
             .last_frame_ms = 0,
+            .running = running,
         };
     }
 
@@ -142,7 +145,7 @@ fn layerSurfaceConfigure(
 
     c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
 
-    // Render first frame
+    // Render first frame (use advanceFrame directly since configure is a one-time event)
     self.renderer.advanceFrame();
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
 
@@ -206,7 +209,7 @@ fn frameCallbackDone(
     };
 
     self.last_frame_ms = time_ms;
-    self.renderer.advanceFrame();
+    self.renderer.maybeAdvance(time_ms);
     self.renderer.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
     framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), self.pixel_w, self.pixel_h);
 
@@ -227,7 +230,7 @@ fn layerSurfaceClosed(
     layer_surface: ?*c.zwlr_layer_surface_v1,
 ) callconv(.c) void {
     _ = layer_surface;
-    _ = data;
-    std.debug.print("layer surface closed, exiting\n", .{});
-    std.process.exit(0);
+    const self: *SurfaceState = @ptrCast(@alignCast(data));
+    std.debug.print("layer surface closed, signaling shutdown\n", .{});
+    self.running.* = false;
 }

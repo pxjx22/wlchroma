@@ -11,6 +11,7 @@ pub const ColormixRenderer = struct {
     pattern_cos_mod: f32,
     pattern_sin_mod: f32,
     palette: [12]Cell,
+    last_advance_ms: u32,
 
     pub fn init(col1: Rgb, col2: Rgb, col3: Rgb) ColormixRenderer {
         var prng = std.Random.DefaultPrng.init(defaults.SEED);
@@ -20,7 +21,19 @@ pub const ColormixRenderer = struct {
             .pattern_cos_mod = random.float(f32) * std.math.pi * 2.0,
             .pattern_sin_mod = random.float(f32) * std.math.pi * 2.0,
             .palette = palette_mod.buildPalette(col1, col2, col3),
+            .last_advance_ms = 0,
         };
+    }
+
+    /// Advance the frame counter at most once per 33ms interval.
+    /// Multiple outputs calling this with the same (or close) timestamp
+    /// will only increment frames once, keeping all outputs in sync.
+    pub fn maybeAdvance(self: *ColormixRenderer, time_ms: u32) void {
+        const delta = time_ms -% self.last_advance_ms;
+        if (self.last_advance_ms == 0 or delta >= 33) {
+            self.frames += 1;
+            self.last_advance_ms = time_ms;
+        }
     }
 
     pub fn advanceFrame(self: *ColormixRenderer) void {
