@@ -7,6 +7,7 @@ const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const EglContext = @import("render/egl_context.zig").EglContext;
+const ShaderProgram = @import("render/shader.zig").ShaderProgram;
 const defaults = @import("config/defaults.zig");
 
 pub const App = struct {
@@ -17,6 +18,7 @@ pub const App = struct {
     surfaces: std.ArrayList(SurfaceState),
     renderer: ColormixRenderer,
     egl_ctx: ?EglContext,
+    shader: ?ShaderProgram,
     running: bool,
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -30,6 +32,7 @@ pub const App = struct {
             .surfaces = .{},
             .renderer = ColormixRenderer.init(defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3),
             .egl_ctx = null,
+            .shader = null,
             .running = true,
         };
 
@@ -101,6 +104,27 @@ pub const App = struct {
 
         // Roundtrip to trigger configure events
         _ = c.wl_display_roundtrip(self.display);
+
+        // Initialize GLES2 shader program using the first available EGL surface.
+        // The EGL context must be current on this thread before creating GL objects.
+        if (self.egl_ctx) |*ctx| {
+            for (self.surfaces.items) |*s| {
+                if (s.egl_surface) |*egl_surf| {
+                    if (egl_surf.makeCurrent(ctx)) {
+                        self.shader = ShaderProgram.init() catch |err| blk: {
+                            std.debug.print("ShaderProgram.init failed: {}\n", .{err});
+                            break :blk null;
+                        };
+                        if (self.shader != null) {
+                            for (self.surfaces.items) |*ss| {
+                                ss.shader = if (self.shader) |*sh| sh else null;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
 
         // --- poll+timerfd main loop ---
         // Create a timerfd that fires every 33ms (~30fps) using CLOCK_MONOTONIC.
@@ -190,6 +214,18 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        // Make EGL context current so GL object deletion works.
+        if (self.egl_ctx) |*ctx| {
+            for (self.surfaces.items) |*s| {
+                if (s.egl_surface) |*egl_surf| {
+                    _ = egl_surf.makeCurrent(ctx);
+                    break;
+                }
+            }
+        }
+        if (self.shader) |*sh| sh.deinit();
+        self.shader = null;
+
         for (self.surfaces.items) |*s| {
             s.deinit(self.display);
         }

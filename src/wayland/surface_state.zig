@@ -8,6 +8,7 @@ const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
 const EglSurface = @import("../render/egl_surface.zig").EglSurface;
 const EglContext = @import("../render/egl_context.zig").EglContext;
+const ShaderProgram = @import("../render/shader.zig").ShaderProgram;
 
 /// Context passed as userdata to each wl_buffer release listener.
 /// Carries a pointer back into ShmPool.busy[i] so acquireBuffer
@@ -34,6 +35,7 @@ pub const SurfaceState = struct {
     running: *bool,
     egl_surface: ?EglSurface,
     egl_ctx: ?*const EglContext,
+    shader: ?*const ShaderProgram,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -83,6 +85,7 @@ pub const SurfaceState = struct {
             .running = running,
             .egl_surface = null,
             .egl_ctx = egl_ctx,
+            .shader = null,
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -116,8 +119,15 @@ pub const SurfaceState = struct {
         if (self.egl_surface) |*egl_surf| {
             const ctx = self.egl_ctx.?;
             if (!egl_surf.makeCurrent(ctx)) return;
-            c.glClearColor(0.0, 0.0, 0.0, 1.0);
-            c.glClear(c.GL_COLOR_BUFFER_BIT);
+
+            if (self.shader) |sh| {
+                c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
+                sh.draw(0.2, 0.4, 0.8); // solid blue -- visible proof shader pipeline works
+            } else {
+                // Shader not ready yet, keep the black clear as fallback
+                c.glClearColor(0.0, 0.0, 0.0, 1.0);
+                c.glClear(c.GL_COLOR_BUFFER_BIT);
+            }
 
             // Arm frame callback BEFORE eglSwapBuffers so the
             // wl_surface_frame request is included in the same commit
@@ -280,8 +290,13 @@ fn layerSurfaceConfigure(
         // With EGL, render the first frame via GPU and skip the shm path
         if (self.egl_surface) |*egl_surf| {
             if (egl_surf.makeCurrent(ctx)) {
-                c.glClearColor(0.0, 0.0, 0.0, 1.0);
-                c.glClear(c.GL_COLOR_BUFFER_BIT);
+                if (self.shader) |sh| {
+                    c.glViewport(0, 0, @intCast(pw), @intCast(ph));
+                    sh.draw(0.2, 0.4, 0.8);
+                } else {
+                    c.glClearColor(0.0, 0.0, 0.0, 1.0);
+                    c.glClear(c.GL_COLOR_BUFFER_BIT);
+                }
 
                 // Destroy any stale callback, then arm before swap
                 if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
