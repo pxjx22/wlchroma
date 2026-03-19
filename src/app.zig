@@ -89,6 +89,7 @@ pub const App = struct {
                 self.display,
                 &self.renderer,
                 &self.running,
+                if (self.egl_ctx) |*ctx| ctx else null,
             );
             try self.surfaces.append(self.allocator, surface_state);
         }

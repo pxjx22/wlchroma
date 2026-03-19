@@ -6,6 +6,8 @@ const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
 const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
+const EglSurface = @import("../render/egl_surface.zig").EglSurface;
+const EglContext = @import("../render/egl_context.zig").EglContext;
 
 /// Context passed as userdata to each wl_buffer release listener.
 /// Carries a pointer back into ShmPool.busy[i] so acquireBuffer
@@ -30,6 +32,8 @@ pub const SurfaceState = struct {
     display: *c.wl_display,
     frame_callback: ?*c.wl_callback,
     running: *bool,
+    egl_surface: ?EglSurface,
+    egl_ctx: ?*const EglContext,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -58,6 +62,7 @@ pub const SurfaceState = struct {
         display: *c.wl_display,
         renderer: *ColormixRenderer,
         running: *bool,
+        egl_ctx: ?*const EglContext,
     ) !SurfaceState {
         const layer_surf = try LayerSurface.create(compositor, layer_shell, out.wl_output, "wallpaper");
 
@@ -76,6 +81,8 @@ pub const SurfaceState = struct {
             .display = display,
             .frame_callback = null,
             .running = running,
+            .egl_surface = null,
+            .egl_ctx = egl_ctx,
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -105,6 +112,27 @@ pub const SurfaceState = struct {
 
         const wl_surface = self.layer_surface.wl_surface orelse return;
 
+        // EGL path: render via GPU when an EGL surface is available.
+        if (self.egl_surface) |*egl_surf| {
+            const ctx = self.egl_ctx.?;
+            if (!egl_surf.makeCurrent(ctx)) return;
+            c.glClearColor(0.0, 0.0, 0.0, 1.0);
+            c.glClear(c.GL_COLOR_BUFFER_BIT);
+
+            // Arm frame callback BEFORE eglSwapBuffers so the
+            // wl_surface_frame request is included in the same commit
+            // that swap triggers internally.
+            const cb = c.wl_surface_frame(wl_surface);
+            self.frame_callback = cb;
+            _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+
+            if (!egl_surf.swapBuffers()) {
+                std.debug.print("eglSwapBuffers failed\n", .{});
+            }
+            return;
+        }
+
+        // SHM/CPU fallback path
         var pool = &(self.shm_pool orelse return);
         const idx = pool.acquireBuffer() orelse {
             // Both buffers busy -- skip this tick. bufferRelease will
@@ -142,6 +170,12 @@ pub const SurfaceState = struct {
         if (self.frame_callback) |cb| {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
+        }
+        // Tear down EGL surface before the layer surface (wl_surface)
+        // is destroyed. EglContext.deinit happens later in App.deinit.
+        if (self.egl_surface) |*egl_surf| {
+            egl_surf.deinit();
+            self.egl_surface = null;
         }
         if (self.configured) {
             if (self.layer_surface.wl_surface) |ws| {
@@ -224,7 +258,46 @@ fn layerSurfaceConfigure(
         @ptrCast(&self.buf_ctx[1]),
     );
 
-    // Render first frame from current renderer state (frame 0)
+    // EGL surface setup: create on first configure, resize on subsequent.
+    if (self.egl_ctx) |ctx| {
+        const wl_surface_egl = self.layer_surface.wl_surface orelse return;
+        if (self.egl_surface) |*existing| {
+            // Resize the existing EGL window -- no need to recreate EGLSurface
+            existing.resize(pw, ph);
+        } else {
+            // First configure: create the EGL surface
+            self.egl_surface = EglSurface.create(ctx, wl_surface_egl, pw, ph) catch |err| blk: {
+                std.debug.print("EglSurface.create failed: {}\n", .{err});
+                break :blk null;
+            };
+            if (self.egl_surface) |*egl_surf| {
+                if (egl_surf.makeCurrent(ctx)) {
+                    _ = c.eglSwapInterval(ctx.display, 0);
+                }
+            }
+        }
+
+        // With EGL, render the first frame via GPU and skip the shm path
+        if (self.egl_surface) |*egl_surf| {
+            if (egl_surf.makeCurrent(ctx)) {
+                c.glClearColor(0.0, 0.0, 0.0, 1.0);
+                c.glClear(c.GL_COLOR_BUFFER_BIT);
+
+                // Destroy any stale callback, then arm before swap
+                if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
+                const cb = c.wl_surface_frame(wl_surface_egl);
+                self.frame_callback = cb;
+                _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+
+                _ = egl_surf.swapBuffers();
+            }
+            self.configured = true;
+            std.debug.print("configure (EGL): {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
+            return;
+        }
+    }
+
+    // SHM/CPU fallback: render first frame from current renderer state
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
 
     var pool = &(self.shm_pool.?);
