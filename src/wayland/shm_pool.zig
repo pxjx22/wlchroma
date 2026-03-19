@@ -46,7 +46,6 @@ pub const ShmPool = struct {
             .fd = fd,
         };
 
-        // Correction #6: wire wl_buffer_listener.release for busy state tracking
         for (0..2) |i| {
             const offset: i32 = @intCast(i * buf_size);
             const buf = c.wl_shm_pool_create_buffer(
@@ -58,10 +57,19 @@ pub const ShmPool = struct {
                 c.WL_SHM_FORMAT_XRGB8888,
             ) orelse return error.BufferCreateFailed;
             self.buffers[i] = buf;
-            _ = c.wl_buffer_add_listener(buf, &buf_listener, &self.busy[i]);
         }
 
         return self;
+    }
+
+    /// Register wl_buffer release listeners. Must be called after the ShmPool
+    /// is at its final memory location (not on a stack-local copy).
+    pub fn attachListeners(self: *ShmPool) void {
+        for (0..2) |i| {
+            if (self.buffers[i]) |buf| {
+                _ = c.wl_buffer_add_listener(buf, &buf_listener, &self.busy[i]);
+            }
+        }
     }
 
     pub fn deinit(self: *ShmPool) void {

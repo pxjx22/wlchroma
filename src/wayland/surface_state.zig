@@ -79,7 +79,6 @@ pub const SurfaceState = struct {
     }
 
     pub fn deinit(self: *SurfaceState, display: *c.wl_display) void {
-        _ = display;
         if (self.frame_callback) |cb| {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
@@ -88,6 +87,8 @@ pub const SurfaceState = struct {
             if (self.layer_surface.wl_surface) |ws| {
                 c.wl_surface_attach(ws, null, 0, 0);
                 c.wl_surface_commit(ws);
+                // Drain pending release events before destroying buffers
+                _ = c.wl_display_roundtrip(display);
             }
         }
         self.layer_surface.destroy();
@@ -142,11 +143,11 @@ fn layerSurfaceConfigure(
         std.debug.print("failed to create ShmPool\n", .{});
         return;
     };
+    self.shm_pool.?.attachListeners();
 
     c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
 
-    // Render first frame (use advanceFrame directly since configure is a one-time event)
-    self.renderer.advanceFrame();
+    // Render first frame from current renderer state (frame 0)
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
 
     var pool = &(self.shm_pool.?);
@@ -199,7 +200,7 @@ fn frameCallbackDone(
 
     var pool = &(self.shm_pool orelse return);
     const idx = pool.acquireBuffer() orelse {
-        // Both buffers busy — bare commit keeps chain alive and triggers release
+        // Both buffers busy — bare commit keeps callback chain alive while waiting for buffer release
         const cb = c.wl_surface_frame(wl_surface);
         self.frame_callback = cb;
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
