@@ -3,6 +3,14 @@ const c = @import("../wl.zig").c;
 const OutputInfo = @import("output.zig").OutputInfo;
 const output_mod = @import("output.zig");
 
+/// File-scope listener struct -- must outlive the wl_registry object.
+/// Defined at file scope (not inside a function) so the Wayland C library's
+/// raw pointer to this listener remains valid for the lifetime of the process.
+const registry_listener = c.wl_registry_listener{
+    .global = registryGlobal,
+    .global_remove = registryGlobalRemove,
+};
+
 pub const Registry = struct {
     compositor: ?*c.wl_compositor = null,
     shm: ?*c.wl_shm = null,
@@ -17,11 +25,7 @@ pub const Registry = struct {
         self.outputs = outputs;
         self.allocator = allocator;
         self.wl_registry = c.wl_display_get_registry(display) orelse return error.RegistryFailed;
-        const listener = c.wl_registry_listener{
-            .global = registryGlobal,
-            .global_remove = registryGlobalRemove,
-        };
-        _ = c.wl_registry_add_listener(self.wl_registry, &listener, self);
+        _ = c.wl_registry_add_listener(self.wl_registry, &registry_listener, self);
     }
 
     pub fn deinit(self: *Self) void {

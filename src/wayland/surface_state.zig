@@ -35,7 +35,6 @@ pub const SurfaceState = struct {
     running: *bool,
     egl_surface: ?EglSurface,
     egl_ctx: ?*const EglContext,
-    shader: ?*const ShaderProgram,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -85,7 +84,6 @@ pub const SurfaceState = struct {
             .running = running,
             .egl_surface = null,
             .egl_ctx = egl_ctx,
-            .shader = null,
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -105,7 +103,9 @@ pub const SurfaceState = struct {
     /// Called by the timerfd tick in the main loop (~30fps).
     /// Renders a new frame if the compositor has presented the previous one
     /// (frame_callback == null) and a buffer is available.
-    pub fn renderTick(self: *SurfaceState) void {
+    /// Render one frame. The shader pointer is passed per-call to avoid
+    /// storing a borrowed pointer on the struct.
+    pub fn renderTick(self: *SurfaceState, shader: ?*const ShaderProgram) void {
         if (!self.configured) return;
 
         // Compositor backpressure: if a frame callback is still pending,
@@ -120,7 +120,8 @@ pub const SurfaceState = struct {
             const ctx = self.egl_ctx.?;
             if (!egl_surf.makeCurrent(ctx)) return;
 
-            if (self.shader) |sh| {
+            // TODO(Phase 4): call renderer.maybeAdvance + pass uniforms to shader
+            if (shader) |sh| {
                 c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
                 sh.draw(0.2, 0.4, 0.8); // solid blue -- visible proof shader pipeline works
             } else {
@@ -231,46 +232,14 @@ fn layerSurfaceConfigure(
         return;
     }
 
-    const grid_w = @max(@divFloor(pw, @as(u32, defaults.CELL_W)), 1);
-    const grid_h = @max(@divFloor(ph, @as(u32, defaults.CELL_H)), 1);
-    self.grid_w = grid_w;
-    self.grid_h = grid_h;
-
-    if (self.cell_grid.len > 0) {
-        self.allocator.free(self.cell_grid);
-    }
-    self.cell_grid = self.allocator.alloc(defaults.Rgb, grid_w * grid_h) catch {
-        std.debug.print("OOM allocating cell_grid\n", .{});
-        return;
-    };
-
-    if (self.shm_pool) |*old| {
-        // Detach the current buffer and roundtrip so the compositor
-        // releases any reference before we destroy the old pool's mmap.
-        if (self.layer_surface.wl_surface) |ws| {
-            c.wl_surface_attach(ws, null, 0, 0);
-            c.wl_surface_commit(ws);
-            _ = c.wl_display_roundtrip(self.display);
-        }
-        old.deinit();
-    }
-    self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
-        std.debug.print("failed to create ShmPool\n", .{});
-        return;
-    };
-    // Initialize per-buffer release contexts now that shm_pool is at its
-    // final address inside this SurfaceState.
-    self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
-    self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
-    self.shm_pool.?.attachListeners(
-        &SurfaceState.buf_release_listener,
-        @ptrCast(&self.buf_ctx[0]),
-        @ptrCast(&self.buf_ctx[1]),
-    );
-
     // EGL surface setup: create on first configure, resize on subsequent.
+    // When EGL is active, skip SHM pool and cell_grid allocation entirely --
+    // the GPU path does not use wl_shm buffers.
     if (self.egl_ctx) |ctx| {
-        const wl_surface_egl = self.layer_surface.wl_surface orelse return;
+        const wl_surface_egl = self.layer_surface.wl_surface orelse {
+            self.configured = false;
+            return;
+        };
         if (self.egl_surface) |*existing| {
             // Resize the existing EGL window -- no need to recreate EGLSurface
             existing.resize(pw, ph);
@@ -290,13 +259,11 @@ fn layerSurfaceConfigure(
         // With EGL, render the first frame via GPU and skip the shm path
         if (self.egl_surface) |*egl_surf| {
             if (egl_surf.makeCurrent(ctx)) {
-                if (self.shader) |sh| {
-                    c.glViewport(0, 0, @intCast(pw), @intCast(ph));
-                    sh.draw(0.2, 0.4, 0.8);
-                } else {
-                    c.glClearColor(0.0, 0.0, 0.0, 1.0);
-                    c.glClear(c.GL_COLOR_BUFFER_BIT);
-                }
+                // Shader is not available in the configure callback (it's
+                // initialized later in App.run). Clear to black; the first
+                // real shader frame will arrive on the next timer tick.
+                c.glClearColor(0.0, 0.0, 0.0, 1.0);
+                c.glClear(c.GL_COLOR_BUFFER_BIT);
 
                 // Destroy any stale callback, then arm before swap
                 if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
@@ -307,10 +274,55 @@ fn layerSurfaceConfigure(
                 _ = egl_surf.swapBuffers();
             }
             self.configured = true;
-            std.debug.print("configure (EGL): {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
+            std.debug.print("configure (EGL): {}x{}\n", .{ pw, ph });
             return;
         }
+
+        // EGL surface creation failed -- mark unconfigured so renderTick skips
+        self.configured = false;
+        return;
     }
+
+    // --- SHM/CPU fallback path ---
+    const grid_w = @max(@divFloor(pw, @as(u32, defaults.CELL_W)), 1);
+    const grid_h = @max(@divFloor(ph, @as(u32, defaults.CELL_H)), 1);
+    self.grid_w = grid_w;
+    self.grid_h = grid_h;
+
+    if (self.cell_grid.len > 0) {
+        self.allocator.free(self.cell_grid);
+        self.cell_grid = &.{};
+    }
+    self.cell_grid = self.allocator.alloc(defaults.Rgb, grid_w * grid_h) catch {
+        std.debug.print("OOM allocating cell_grid\n", .{});
+        self.configured = false;
+        return;
+    };
+
+    // Tear down old SHM pool. Set self.shm_pool = null first so that on
+    // failure of the new init, we do not hold a dangling (deinitialized) pool.
+    // wl_buffer_destroy is safe per protocol even if the compositor holds a
+    // reference -- the compositor will release it internally. No roundtrip
+    // needed (calling wl_display_roundtrip inside a callback is re-entrant UB).
+    if (self.shm_pool) |*old| {
+        old.deinit();
+        self.shm_pool = null;
+        self.buf_ctx = undefined;
+    }
+    self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
+        std.debug.print("failed to create ShmPool\n", .{});
+        self.configured = false;
+        return;
+    };
+    // Initialize per-buffer release contexts now that shm_pool is at its
+    // final address inside this SurfaceState.
+    self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
+    self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
+    self.shm_pool.?.attachListeners(
+        &SurfaceState.buf_release_listener,
+        @ptrCast(&self.buf_ctx[0]),
+        @ptrCast(&self.buf_ctx[1]),
+    );
 
     // SHM/CPU fallback: render first frame from current renderer state
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
@@ -353,6 +365,10 @@ fn frameCallbackDone(
     self.frame_callback = null;
 }
 
+/// Layer surface closed by the compositor. This sets the shared App.running
+/// flag to false, which terminates the entire application. This is intentional:
+/// any output closing triggers a full shutdown. Per-output lifecycle tracking
+/// (allowing other outputs to continue) is out of scope for now.
 fn layerSurfaceClosed(
     data: ?*anyopaque,
     layer_surface: ?*c.zwlr_layer_surface_v1,

@@ -39,7 +39,7 @@ pub const App = struct {
         try app.registry.bind(display, &app.outputs, allocator);
 
         // 1st roundtrip: bind all globals (outputs appended to ArrayList)
-        _ = c.wl_display_roundtrip(display);
+        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
 
         // Attach wl_output listeners now that the ArrayList is stable --
         // no more appends will invalidate item pointers.
@@ -50,7 +50,7 @@ pub const App = struct {
         }
 
         // 2nd roundtrip: collect all output done events
-        _ = c.wl_display_roundtrip(display);
+        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
 
         std.debug.print("bound: wl_compositor={} wl_shm={} zwlr_layer_shell_v1={}\n", .{
             app.registry.compositor != null,
@@ -103,7 +103,7 @@ pub const App = struct {
         }
 
         // Roundtrip to trigger configure events
-        _ = c.wl_display_roundtrip(self.display);
+        if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
 
         // Initialize GLES2 shader program using the first available EGL surface.
         // The EGL context must be current on this thread before creating GL objects.
@@ -115,11 +115,8 @@ pub const App = struct {
                             std.debug.print("ShaderProgram.init failed: {}\n", .{err});
                             break :blk null;
                         };
-                        if (self.shader != null) {
-                            for (self.surfaces.items) |*ss| {
-                                ss.shader = if (self.shader) |*sh| sh else null;
-                            }
-                        }
+                        // Shader pointer is passed to renderTick per-frame,
+                        // not stored on SurfaceState, to avoid dangling borrows.
                     }
                     break;
                 }
@@ -129,13 +126,7 @@ pub const App = struct {
         // --- poll+timerfd main loop ---
         // Create a timerfd that fires every 33ms (~30fps) using CLOCK_MONOTONIC.
         // This replaces vblank-rate wakeups with render-rate wakeups.
-        const tfd_rc = linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
-        const tfd_errno = linux.E.init(tfd_rc);
-        if (tfd_errno != .SUCCESS) {
-            std.debug.print("timerfd_create failed: {}\n", .{tfd_errno});
-            return error.TimerfdCreateFailed;
-        }
-        const tfd: posix.fd_t = @intCast(tfd_rc);
+        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
         // Arm: first fire in 33ms, repeat every 33ms
@@ -143,12 +134,7 @@ pub const App = struct {
             .it_value = .{ .sec = 0, .nsec = 33_333_333 },
             .it_interval = .{ .sec = 0, .nsec = 33_333_333 },
         };
-        const set_rc = linux.timerfd_settime(tfd, .{}, &interval, null);
-        const set_errno = linux.E.init(set_rc);
-        if (set_errno != .SUCCESS) {
-            std.debug.print("timerfd_settime failed: {}\n", .{set_errno});
-            return error.TimerfdSetTimeFailed;
-        }
+        try posix.timerfd_settime(tfd, .{}, &interval, null);
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
 
@@ -206,8 +192,9 @@ pub const App = struct {
                 var buf: [8]u8 = undefined;
                 _ = posix.read(tfd, &buf) catch {};
 
+                const sh_ptr: ?*const ShaderProgram = if (self.shader) |*sh| sh else null;
                 for (self.surfaces.items) |*s| {
-                    s.renderTick();
+                    s.renderTick(sh_ptr);
                 }
             }
         }
@@ -216,15 +203,26 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
+            var made_current = false;
             for (self.surfaces.items) |*s| {
                 if (s.egl_surface) |*egl_surf| {
-                    _ = egl_surf.makeCurrent(ctx);
+                    made_current = egl_surf.makeCurrent(ctx);
+                    if (!made_current) {
+                        std.debug.print("deinit: eglMakeCurrent failed, GL cleanup may be incomplete\n", .{});
+                    }
                     break;
                 }
             }
         }
         if (self.shader) |*sh| sh.deinit();
         self.shader = null;
+
+        // Unbind EGL context from the surface before destroying EGLSurfaces.
+        // eglDestroySurface on a current surface is implementation-defined;
+        // unbinding first is the safe portable path.
+        if (self.egl_ctx) |*ctx| {
+            _ = c.eglMakeCurrent(ctx.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
+        }
 
         for (self.surfaces.items) |*s| {
             s.deinit(self.display);

@@ -44,7 +44,7 @@ pub const ShaderProgram = struct {
         var link_status: c.GLint = 0;
         c.glGetProgramiv(program, c.GL_LINK_STATUS, &link_status);
         if (link_status == 0) {
-            var buf: [512]u8 = undefined;
+            var buf: [512]u8 = std.mem.zeroes([512]u8);
             c.glGetProgramInfoLog(program, 512, null, &buf);
             std.debug.print("program link error: {s}\n", .{@as([*:0]const u8, @ptrCast(&buf))});
             return error.GlLinkFailed;
@@ -121,7 +121,7 @@ fn compileShader(shader_type: c.GLenum, src: [*:0]const u8) !c.GLuint {
     var status: c.GLint = 0;
     c.glGetShaderiv(shader, c.GL_COMPILE_STATUS, &status);
     if (status == 0) {
-        var buf: [512]u8 = undefined;
+        var buf: [512]u8 = std.mem.zeroes([512]u8);
         c.glGetShaderInfoLog(shader, 512, null, &buf);
         std.debug.print("shader compile error: {s}\n", .{@as([*:0]const u8, @ptrCast(&buf))});
         return error.GlCompileFailed;
