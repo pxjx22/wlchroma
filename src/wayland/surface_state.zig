@@ -2,7 +2,7 @@ const std = @import("std");
 const c = @import("../wl.zig").c;
 const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
-const SolidColorRenderer = @import("../render/solid.zig").SolidColorRenderer;
+const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
 const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
@@ -12,7 +12,7 @@ pub const SurfaceState = struct {
     layer_surface: LayerSurface,
     shm_pool: ?ShmPool,
     shm: *c.wl_shm,
-    renderer: *SolidColorRenderer,
+    renderer: *ColormixRenderer,
     cell_grid: []defaults.Rgb,
     grid_w: usize,
     grid_h: usize,
@@ -20,10 +20,16 @@ pub const SurfaceState = struct {
     pixel_h: u32,
     configured: bool,
     display: *c.wl_display,
+    frame_callback: ?*c.wl_callback,
+    last_frame_ms: u32,
 
     const layer_surface_listener = c.zwlr_layer_surface_v1_listener{
         .configure = layerSurfaceConfigure,
         .closed = layerSurfaceClosed,
+    };
+
+    const frame_callback_listener = c.wl_callback_listener{
+        .done = frameCallbackDone,
     };
 
     /// Create the SurfaceState value. Does NOT attach the listener yet --
@@ -35,7 +41,7 @@ pub const SurfaceState = struct {
         layer_shell: *c.zwlr_layer_shell_v1,
         out: *const OutputInfo,
         display: *c.wl_display,
-        renderer: *SolidColorRenderer,
+        renderer: *ColormixRenderer,
     ) !SurfaceState {
         const layer_surf = try LayerSurface.create(compositor, layer_shell, out.wl_output, "wallpaper");
 
@@ -52,6 +58,8 @@ pub const SurfaceState = struct {
             .pixel_h = @intCast(@max(0, out.height)),
             .configured = false,
             .display = display,
+            .frame_callback = null,
+            .last_frame_ms = 0,
         };
     }
 
@@ -69,6 +77,10 @@ pub const SurfaceState = struct {
 
     pub fn deinit(self: *SurfaceState, display: *c.wl_display) void {
         _ = display;
+        if (self.frame_callback) |cb| {
+            c.wl_callback_destroy(cb);
+            self.frame_callback = null;
+        }
         if (self.configured) {
             if (self.layer_surface.wl_surface) |ws| {
                 c.wl_surface_attach(ws, null, 0, 0);
@@ -114,7 +126,6 @@ fn layerSurfaceConfigure(
     self.grid_w = grid_w;
     self.grid_h = grid_h;
 
-    // Free old cell_grid if reconfigured
     if (self.cell_grid.len > 0) {
         self.allocator.free(self.cell_grid);
     }
@@ -123,35 +134,92 @@ fn layerSurfaceConfigure(
         return;
     };
 
-    // Init/reinit ShmPool
     if (self.shm_pool) |*old| old.deinit();
     self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
         std.debug.print("failed to create ShmPool\n", .{});
         return;
     };
 
-    // Ack configure
     c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
 
+    // Render first frame
+    self.renderer.advanceFrame();
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
 
     var pool = &(self.shm_pool.?);
     const idx = pool.acquireBuffer() orelse {
-        std.debug.print("no free buffer\n", .{});
+        std.debug.print("no free buffer on configure\n", .{});
         return;
     };
 
-    const pixels = pool.pixelSlice(idx);
-    framebuffer.expandCells(self.cell_grid, grid_w, grid_h, pixels, pw, ph);
+    framebuffer.expandCells(self.cell_grid, grid_w, grid_h, pool.pixelSlice(idx), pw, ph);
 
-    // Attach, damage, commit
     const wl_surface = self.layer_surface.wl_surface orelse return;
     c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
     c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-    c.wl_surface_commit(wl_surface);
 
+    // Destroy any stale callback, then request next frame BEFORE commit
+    if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
+    const cb = c.wl_surface_frame(wl_surface);
+    self.frame_callback = cb;
+    _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+
+    c.wl_surface_commit(wl_surface);
     self.configured = true;
     std.debug.print("configure: {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
+}
+
+fn frameCallbackDone(
+    data: ?*anyopaque,
+    callback: ?*c.wl_callback,
+    time_ms: u32,
+) callconv(.c) void {
+    const self: *SurfaceState = @ptrCast(@alignCast(data));
+
+    c.wl_callback_destroy(callback);
+    self.frame_callback = null;
+
+    const wl_surface = self.layer_surface.wl_surface orelse return;
+
+    // 30fps cap: skip render if < 33ms since last rendered frame.
+    // last_frame_ms == 0 means we haven't rendered a frame yet; always render.
+    const delta = time_ms -% self.last_frame_ms;
+    if (self.last_frame_ms != 0 and delta < 33) {
+        // Too soon — bare commit to stay in the callback chain
+        const cb = c.wl_surface_frame(wl_surface);
+        self.frame_callback = cb;
+        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+        c.wl_surface_commit(wl_surface);
+        _ = c.wl_display_flush(self.display);
+        return;
+    }
+
+    var pool = &(self.shm_pool orelse return);
+    const idx = pool.acquireBuffer() orelse {
+        // Both buffers busy — bare commit keeps chain alive and triggers release
+        const cb = c.wl_surface_frame(wl_surface);
+        self.frame_callback = cb;
+        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+        c.wl_surface_commit(wl_surface);
+        _ = c.wl_display_flush(self.display);
+        return;
+    };
+
+    self.last_frame_ms = time_ms;
+    self.renderer.advanceFrame();
+    self.renderer.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
+    framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), self.pixel_w, self.pixel_h);
+
+    c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
+    c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+
+    // Request next frame BEFORE commit
+    const cb = c.wl_surface_frame(wl_surface);
+    self.frame_callback = cb;
+    _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+
+    c.wl_surface_commit(wl_surface);
+    _ = c.wl_display_flush(self.display);
 }
 
 fn layerSurfaceClosed(

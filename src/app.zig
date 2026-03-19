@@ -3,7 +3,7 @@ const c = @import("wl.zig").c;
 const Registry = @import("wayland/registry.zig").Registry;
 const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
-const SolidColorRenderer = @import("render/solid.zig").SolidColorRenderer;
+const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const defaults = @import("config/defaults.zig");
 
 pub const App = struct {
@@ -12,7 +12,7 @@ pub const App = struct {
     registry: Registry,
     outputs: std.ArrayList(OutputInfo),
     surfaces: std.ArrayList(SurfaceState),
-    renderer: SolidColorRenderer,
+    renderer: ColormixRenderer,
     running: bool,
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -24,7 +24,7 @@ pub const App = struct {
             .registry = Registry{},
             .outputs = .{},
             .surfaces = .{},
-            .renderer = SolidColorRenderer.init(defaults.DEFAULT_COLOR),
+            .renderer = ColormixRenderer.init(defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3),
             .running = true,
         };
 
