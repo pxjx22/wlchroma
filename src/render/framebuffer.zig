@@ -3,6 +3,9 @@ pub const Rgb = defaults.Rgb;
 
 /// Expand cell_grid (grid_w * grid_h Rgb values, indexed [x * grid_h + y])
 /// into pixel_buf as XRGB8888 (4 bytes/pixel, little-endian: [B, G, R, 0x00]).
+///
+/// Iterates over cells and fills their pixel rectangles directly, avoiding
+/// per-pixel division and clamping.
 pub fn expandCells(
     cells: []const Rgb,
     grid_w: usize,
@@ -11,16 +14,32 @@ pub fn expandCells(
     w: u32,
     h: u32,
 ) void {
-    for (0..h) |py| {
-        const cell_y = @min(grid_h - 1, @divFloor(py, defaults.CELL_H));
-        for (0..w) |px| {
-            const cell_x = @min(grid_w - 1, @divFloor(px, defaults.CELL_W));
-            const color = cells[cell_x * grid_h + cell_y];
-            const base = (py * w + px) * 4;
-            pixel_buf[base + 0] = color.b; // B
-            pixel_buf[base + 1] = color.g; // G
-            pixel_buf[base + 2] = color.r; // R
-            pixel_buf[base + 3] = 0x00; // X (padding)
+    const pw: usize = w;
+    const ph: usize = h;
+
+    for (0..grid_h) |cy| {
+        const py_start = cy * defaults.CELL_H;
+        // Last cell row extends to the pixel boundary (handles partial cells).
+        const py_end = if (cy + 1 < grid_h) (cy + 1) * defaults.CELL_H else ph;
+        if (py_start >= ph) break;
+        const py_limit = @min(py_end, ph);
+
+        for (0..grid_w) |cx| {
+            const px_start = cx * defaults.CELL_W;
+            const px_end = if (cx + 1 < grid_w) (cx + 1) * defaults.CELL_W else pw;
+            if (px_start >= pw) break;
+            const px_limit = @min(px_end, pw);
+
+            const color = cells[cx * grid_h + cy];
+            const pixel: [4]u8 = .{ color.b, color.g, color.r, 0x00 };
+
+            for (py_start..py_limit) |py| {
+                const row_offset = py * pw;
+                for (px_start..px_limit) |px| {
+                    const base = (row_offset + px) * 4;
+                    pixel_buf[base..][0..4].* = pixel;
+                }
+            }
         }
     }
 }

@@ -67,9 +67,12 @@ fn registryGlobal(
             .done = false,
             .allocator = self.allocator,
         };
+        // Append only; do NOT register wl_output listener here.
+        // The ArrayList may reallocate on subsequent appends, which would
+        // invalidate any pointer passed as listener data.  Listeners are
+        // attached in a second pass after all outputs have been collected
+        // (see App.init).
         outputs.append(self.allocator, info) catch return;
-        const out_ptr = &outputs.items[outputs.items.len - 1];
-        _ = c.wl_output_add_listener(wl_out, &output_mod.output_listener, out_ptr);
     }
 }
 

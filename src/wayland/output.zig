@@ -55,9 +55,11 @@ fn outputMode(
     height: i32,
     refresh: i32,
 ) callconv(.c) void {
-    _ = flags;
     _ = refresh;
     _ = wl_output;
+    // Only record dimensions for the current mode; compositors may
+    // advertise multiple modes, but only the current one is active.
+    if (flags & c.WL_OUTPUT_MODE_CURRENT == 0) return;
     const self: *OutputInfo = @ptrCast(@alignCast(data));
     self.width = width;
     self.height = height;

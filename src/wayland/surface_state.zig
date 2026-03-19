@@ -119,9 +119,11 @@ fn layerSurfaceConfigure(
     self.pixel_w = pw;
     self.pixel_h = ph;
 
+    // Always ack the configure to avoid stalling the compositor.
+    c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
+
     if (pw == 0 or ph == 0) {
         std.debug.print("configure: zero dimensions, skipping\n", .{});
-        c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
         return;
     }
 
@@ -138,14 +140,21 @@ fn layerSurfaceConfigure(
         return;
     };
 
-    if (self.shm_pool) |*old| old.deinit();
+    if (self.shm_pool) |*old| {
+        // Detach the current buffer and roundtrip so the compositor
+        // releases any reference before we destroy the old pool's mmap.
+        if (self.layer_surface.wl_surface) |ws| {
+            c.wl_surface_attach(ws, null, 0, 0);
+            c.wl_surface_commit(ws);
+            _ = c.wl_display_roundtrip(self.display);
+        }
+        old.deinit();
+    }
     self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
         std.debug.print("failed to create ShmPool\n", .{});
         return;
     };
     self.shm_pool.?.attachListeners();
-
-    c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
 
     // Render first frame from current renderer state (frame 0)
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
@@ -189,23 +198,23 @@ fn frameCallbackDone(
     // last_frame_ms == 0 means we haven't rendered a frame yet; always render.
     const delta = time_ms -% self.last_frame_ms;
     if (self.last_frame_ms != 0 and delta < 33) {
-        // Too soon — bare commit to stay in the callback chain
+        // Too soon -- bare commit to stay in the callback chain.
+        // No wl_display_flush needed; dispatch already flushes.
         const cb = c.wl_surface_frame(wl_surface);
         self.frame_callback = cb;
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
         c.wl_surface_commit(wl_surface);
-        _ = c.wl_display_flush(self.display);
         return;
     }
 
     var pool = &(self.shm_pool orelse return);
     const idx = pool.acquireBuffer() orelse {
-        // Both buffers busy — bare commit keeps callback chain alive while waiting for buffer release
+        // Both buffers busy -- bare commit keeps callback chain alive.
+        // No wl_display_flush needed; dispatch already flushes.
         const cb = c.wl_surface_frame(wl_surface);
         self.frame_callback = cb;
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
         c.wl_surface_commit(wl_surface);
-        _ = c.wl_display_flush(self.display);
         return;
     };
 
@@ -223,7 +232,8 @@ fn frameCallbackDone(
     _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
 
     c.wl_surface_commit(wl_surface);
-    _ = c.wl_display_flush(self.display);
+    // No wl_display_flush needed; wl_display_dispatch in the main loop
+    // flushes the outgoing queue before reading.
 }
 
 fn layerSurfaceClosed(

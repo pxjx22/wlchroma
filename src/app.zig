@@ -30,8 +30,17 @@ pub const App = struct {
 
         try app.registry.bind(display, &app.outputs, allocator);
 
-        // 1st roundtrip: bind all globals
+        // 1st roundtrip: bind all globals (outputs appended to ArrayList)
         _ = c.wl_display_roundtrip(display);
+
+        // Attach wl_output listeners now that the ArrayList is stable --
+        // no more appends will invalidate item pointers.
+        for (app.outputs.items) |*out| {
+            if (out.wl_output) |wl_out| {
+                _ = c.wl_output_add_listener(wl_out, &@import("wayland/output.zig").output_listener, out);
+            }
+        }
+
         // 2nd roundtrip: collect all output done events
         _ = c.wl_display_roundtrip(display);
 
