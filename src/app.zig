@@ -1,4 +1,6 @@
 const std = @import("std");
+const posix = std.posix;
+const linux = std.os.linux;
 const c = @import("wl.zig").c;
 const Registry = @import("wayland/registry.zig").Registry;
 const OutputInfo = @import("wayland/output.zig").OutputInfo;
@@ -91,12 +93,89 @@ pub const App = struct {
         // Roundtrip to trigger configure events
         _ = c.wl_display_roundtrip(self.display);
 
-        // Main event loop
+        // --- poll+timerfd main loop ---
+        // Create a timerfd that fires every 33ms (~30fps) using CLOCK_MONOTONIC.
+        // This replaces vblank-rate wakeups with render-rate wakeups.
+        const tfd_rc = linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+        const tfd_errno = linux.E.init(tfd_rc);
+        if (tfd_errno != .SUCCESS) {
+            std.debug.print("timerfd_create failed: {}\n", .{tfd_errno});
+            return error.TimerfdCreateFailed;
+        }
+        const tfd: posix.fd_t = @intCast(tfd_rc);
+        defer posix.close(tfd);
+
+        // Arm: first fire in 33ms, repeat every 33ms
+        const interval = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = 33_333_333 },
+            .it_interval = .{ .sec = 0, .nsec = 33_333_333 },
+        };
+        const set_rc = linux.timerfd_settime(tfd, .{}, &interval, null);
+        const set_errno = linux.E.init(set_rc);
+        if (set_errno != .SUCCESS) {
+            std.debug.print("timerfd_settime failed: {}\n", .{set_errno});
+            return error.TimerfdSetTimeFailed;
+        }
+
+        const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
+
+        var fds = [2]posix.pollfd{
+            .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
+        };
+
         while (self.running) {
-            const ret = c.wl_display_dispatch(self.display);
-            if (ret < 0) {
-                std.debug.print("wl_display_dispatch error\n", .{});
+            // Flush outgoing Wayland requests before sleeping in poll.
+            // wl_display_flush returns -1 on fatal error (e.g. broken pipe).
+            if (c.wl_display_flush(self.display) < 0) {
+                std.debug.print("wl_display_flush error, exiting\n", .{});
                 break;
+            }
+
+            // Prepare to read Wayland events. This must be done before
+            // poll() to avoid a race where events arrive between the last
+            // dispatch and the poll call. If prepare_read fails (-1), there
+            // are already queued events -- dispatch them immediately.
+            const prep = c.wl_display_prepare_read(self.display);
+            if (prep != 0) {
+                // Events already queued, dispatch without blocking
+                _ = c.wl_display_dispatch_pending(self.display);
+                continue;
+            }
+
+            // Block until the Wayland socket or timerfd is readable.
+            fds[0].revents = 0;
+            fds[1].revents = 0;
+            _ = posix.poll(&fds, -1) catch |err| {
+                c.wl_display_cancel_read(self.display);
+                std.debug.print("poll error: {}\n", .{err});
+                break;
+            };
+
+            // Read Wayland events if the socket is readable
+            if (fds[0].revents & linux.POLL.IN != 0) {
+                if (c.wl_display_read_events(self.display) < 0) {
+                    std.debug.print("wl_display_read_events error\n", .{});
+                    break;
+                }
+            } else {
+                // No Wayland data -- cancel the prepared read
+                c.wl_display_cancel_read(self.display);
+            }
+
+            // Dispatch any pending Wayland events (frame callbacks,
+            // configure, buffer release, etc.)
+            _ = c.wl_display_dispatch_pending(self.display);
+
+            // Timer tick -- attempt render on all surfaces
+            if (fds[1].revents & linux.POLL.IN != 0) {
+                // Drain the timerfd (8-byte expiration count)
+                var buf: [8]u8 = undefined;
+                _ = posix.read(tfd, &buf) catch {};
+
+                for (self.surfaces.items) |*s| {
+                    s.renderTick();
+                }
             }
         }
     }
