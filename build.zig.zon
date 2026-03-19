@@ -1,0 +1,8 @@
+.{
+    .fingerprint = 0xc7327b37e44f67aa,
+    .name = .ly_colormix_wallpaper,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{"."},
+}
