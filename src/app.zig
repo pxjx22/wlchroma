@@ -6,6 +6,7 @@ const Registry = @import("wayland/registry.zig").Registry;
 const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
+const EglContext = @import("render/egl_context.zig").EglContext;
 const defaults = @import("config/defaults.zig");
 
 pub const App = struct {
@@ -15,6 +16,7 @@ pub const App = struct {
     outputs: std.ArrayList(OutputInfo),
     surfaces: std.ArrayList(SurfaceState),
     renderer: ColormixRenderer,
+    egl_ctx: ?EglContext,
     running: bool,
 
     pub fn init(allocator: std.mem.Allocator) !App {
@@ -27,6 +29,7 @@ pub const App = struct {
             .outputs = .{},
             .surfaces = .{},
             .renderer = ColormixRenderer.init(defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3),
+            .egl_ctx = null,
             .running = true,
         };
 
@@ -51,6 +54,11 @@ pub const App = struct {
             app.registry.shm != null,
             app.registry.layer_shell != null,
         });
+
+        app.egl_ctx = EglContext.init(display) catch |err| blk: {
+            std.debug.print("EGL init failed: {}, falling back to CPU path\n", .{err});
+            break :blk null;
+        };
 
         if (app.registry.compositor == null) return error.MissingCompositor;
         if (app.registry.shm == null) return error.MissingShm;
@@ -190,6 +198,8 @@ pub const App = struct {
             out.deinit();
         }
         self.outputs.deinit(self.allocator);
+
+        if (self.egl_ctx) |*ctx| ctx.deinit();
 
         self.registry.deinit();
         c.wl_display_disconnect(self.display);

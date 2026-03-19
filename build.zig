@@ -42,6 +42,9 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(hdr.dirname());
     mod.addIncludePath(xdg_hdr.dirname());
     mod.linkSystemLibrary("wayland-client", .{});
+    mod.linkSystemLibrary("EGL", .{});
+    mod.linkSystemLibrary("GLESv2", .{});
+    mod.linkSystemLibrary("wayland-egl", .{});
 
     const exe = b.addExecutable(.{
         .name = "ly-colormix-wallpaper",
