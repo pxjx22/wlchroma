@@ -62,13 +62,20 @@ pub const ShmPool = struct {
         return self;
     }
 
-    /// Register wl_buffer release listeners. Must be called after the ShmPool
-    /// is at its final memory location (not on a stack-local copy).
-    pub fn attachListeners(self: *ShmPool) void {
-        for (0..2) |i| {
-            if (self.buffers[i]) |buf| {
-                _ = c.wl_buffer_add_listener(buf, &buf_listener, &self.busy[i]);
-            }
+    /// Register wl_buffer release listeners with caller-provided userdata
+    /// and listener vtable. This allows the caller (SurfaceState) to supply
+    /// a richer context (e.g. BufReleaseCtx) instead of bare *bool.
+    pub fn attachListeners(
+        self: *ShmPool,
+        listener: *const c.wl_buffer_listener,
+        data0: *anyopaque,
+        data1: *anyopaque,
+    ) void {
+        if (self.buffers[0]) |buf| {
+            _ = c.wl_buffer_add_listener(buf, listener, data0);
+        }
+        if (self.buffers[1]) |buf| {
+            _ = c.wl_buffer_add_listener(buf, listener, data1);
         }
     }
 
@@ -105,12 +112,3 @@ pub const ShmPool = struct {
     }
 };
 
-const buf_listener = c.wl_buffer_listener{
-    .release = bufferRelease,
-};
-
-fn bufferRelease(data: ?*anyopaque, buffer: ?*c.wl_buffer) callconv(.c) void {
-    _ = buffer;
-    const busy: *bool = @ptrCast(@alignCast(data));
-    busy.* = false;
-}

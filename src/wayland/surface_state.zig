@@ -7,6 +7,16 @@ const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
 
+/// Context passed as userdata to each wl_buffer release listener.
+/// Carries a pointer back into ShmPool.busy[i] (so acquireBuffer still
+/// works unchanged) and a pointer to the owning SurfaceState (so the
+/// release handler can restart the frame-callback chain after
+/// backpressure).
+pub const BufReleaseCtx = struct {
+    pool_busy: *bool,
+    surface: *SurfaceState,
+};
+
 pub const SurfaceState = struct {
     allocator: std.mem.Allocator,
     layer_surface: LayerSurface,
@@ -23,6 +33,13 @@ pub const SurfaceState = struct {
     frame_callback: ?*c.wl_callback,
     last_frame_ms: u32,
     running: *bool,
+    /// True when both buffers were busy and the frame-callback chain
+    /// was intentionally allowed to lapse. The chain is restarted from
+    /// bufferRelease when a buffer becomes available.
+    waiting_for_frame: bool,
+    /// Per-buffer release context, stored here so the release handler
+    /// can reach both the ShmPool busy flag and the SurfaceState.
+    buf_ctx: [2]BufReleaseCtx,
 
     const layer_surface_listener = c.zwlr_layer_surface_v1_listener{
         .configure = layerSurfaceConfigure,
@@ -31,6 +48,10 @@ pub const SurfaceState = struct {
 
     const frame_callback_listener = c.wl_callback_listener{
         .done = frameCallbackDone,
+    };
+
+    const buf_release_listener = c.wl_buffer_listener{
+        .release = bufferRelease,
     };
 
     /// Create the SurfaceState value. Does NOT attach the listener yet --
@@ -63,6 +84,8 @@ pub const SurfaceState = struct {
             .frame_callback = null,
             .last_frame_ms = 0,
             .running = running,
+            .waiting_for_frame = false,
+            .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
 
@@ -154,7 +177,16 @@ fn layerSurfaceConfigure(
         std.debug.print("failed to create ShmPool\n", .{});
         return;
     };
-    self.shm_pool.?.attachListeners();
+    // Initialize per-buffer release contexts now that shm_pool is at its
+    // final address inside this SurfaceState.
+    self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
+    self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
+    self.waiting_for_frame = false;
+    self.shm_pool.?.attachListeners(
+        &SurfaceState.buf_release_listener,
+        @ptrCast(&self.buf_ctx[0]),
+        @ptrCast(&self.buf_ctx[1]),
+    );
 
     // Render first frame from current renderer state (frame 0)
     self.renderer.renderGrid(grid_w, grid_h, self.cell_grid);
@@ -198,8 +230,14 @@ fn frameCallbackDone(
     // last_frame_ms == 0 means we haven't rendered a frame yet; always render.
     const delta = time_ms -% self.last_frame_ms;
     if (self.last_frame_ms != 0 and delta < 33) {
-        // Too soon -- bare commit to stay in the callback chain.
-        // No wl_display_flush needed; dispatch already flushes.
+        // Too soon — bare commit to stay in the callback chain.
+        // NOTE: This still fires at monitor rate (60/120/144 Hz) because
+        // Wayland frame callbacks require a wl_surface_commit to re-arm.
+        // Truly reducing this to 30 Hz would require a timerfd or a
+        // poll-based main loop; the current wl_display_dispatch loop has
+        // no mechanism to sleep until the next render tick while still
+        // processing Wayland events. The overhead is minimal (one
+        // empty commit per vblank) and is the standard Wayland pattern.
         const cb = c.wl_surface_frame(wl_surface);
         self.frame_callback = cb;
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
@@ -209,12 +247,10 @@ fn frameCallbackDone(
 
     var pool = &(self.shm_pool orelse return);
     const idx = pool.acquireBuffer() orelse {
-        // Both buffers busy -- bare commit keeps callback chain alive.
-        // No wl_display_flush needed; dispatch already flushes.
-        const cb = c.wl_surface_frame(wl_surface);
-        self.frame_callback = cb;
-        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
-        c.wl_surface_commit(wl_surface);
+        // Both buffers held by compositor — let the frame-callback chain
+        // lapse. bufferRelease will restart it when a buffer is freed.
+        // This avoids bare-commit churn at monitor rate while waiting.
+        self.waiting_for_frame = true;
         return;
     };
 
@@ -244,4 +280,28 @@ fn layerSurfaceClosed(
     const self: *SurfaceState = @ptrCast(@alignCast(data));
     std.debug.print("layer surface closed, signaling shutdown\n", .{});
     self.running.* = false;
+}
+
+/// wl_buffer.release handler. Clears the busy flag in ShmPool so
+/// acquireBuffer can hand the buffer out again, and — if the frame-
+/// callback chain was allowed to lapse because both buffers were busy —
+/// restarts the chain so rendering resumes.
+fn bufferRelease(data: ?*anyopaque, buffer: ?*c.wl_buffer) callconv(.c) void {
+    _ = buffer;
+    const ctx: *BufReleaseCtx = @ptrCast(@alignCast(data));
+    ctx.pool_busy.* = false;
+
+    const surface = ctx.surface;
+    if (surface.waiting_for_frame) {
+        surface.waiting_for_frame = false;
+
+        // Don't restart the chain if we're shutting down.
+        if (!surface.running.*) return;
+
+        const wl_surface = surface.layer_surface.wl_surface orelse return;
+        const cb = c.wl_surface_frame(wl_surface);
+        surface.frame_callback = cb;
+        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, surface);
+        c.wl_surface_commit(wl_surface);
+    }
 }
