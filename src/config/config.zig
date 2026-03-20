@@ -62,7 +62,7 @@ pub fn loadConfig(allocator: std.mem.Allocator) !AppConfig {
     };
     defer allocator.free(content);
 
-    return parseAndValidate(content);
+    return parseAndValidateExistingConfig(content);
 }
 
 const ConfigPath = struct {
@@ -90,11 +90,73 @@ fn resolveConfigPath(allocator: std.mem.Allocator) !ConfigPath {
     return error.NoHome;
 }
 
+const ParseOptions = struct {
+    require_version: bool = false,
+};
+
+const MAX_SEEN_KEYS = 64;
+const RENDERER_SCALE_NEAR_NATIVE_MIN: f32 = 0.95;
+
+const SeenNames = struct {
+    buf: [MAX_SEEN_KEYS][]const u8,
+    len: usize,
+
+    fn contains(self: *const SeenNames, name: []const u8) bool {
+        for (self.buf[0..self.len]) |seen| {
+            if (std.mem.eql(u8, seen, name)) return true;
+        }
+        return false;
+    }
+
+    fn add(self: *SeenNames, name: []const u8) !void {
+        if (self.contains(name)) return error.DuplicateConfigEntry;
+        if (self.len >= self.buf.len) return error.MalformedConfig;
+        self.buf[self.len] = name;
+        self.len += 1;
+    }
+};
+
+const SeenKey = struct {
+    section_name: []const u8,
+    key: []const u8,
+};
+
+const SeenKeys = struct {
+    buf: [MAX_SEEN_KEYS]SeenKey,
+    len: usize,
+
+    fn contains(self: *const SeenKeys, section_name: []const u8, key: []const u8) bool {
+        for (self.buf[0..self.len]) |seen| {
+            if (std.mem.eql(u8, seen.section_name, section_name) and std.mem.eql(u8, seen.key, key)) return true;
+        }
+        return false;
+    }
+
+    fn add(self: *SeenKeys, section_name: []const u8, key: []const u8) !void {
+        if (self.contains(section_name, key)) return error.DuplicateConfigEntry;
+        if (self.len >= self.buf.len) return error.MalformedConfig;
+        self.buf[self.len] = .{ .section_name = section_name, .key = key };
+        self.len += 1;
+    }
+};
+
+fn parseAndValidateExistingConfig(content: []const u8) !AppConfig {
+    return parseAndValidateWithOptions(content, .{ .require_version = true });
+}
+
 fn parseAndValidate(content: []const u8) !AppConfig {
+    return parseAndValidateWithOptions(content, .{});
+}
+
+fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppConfig {
     var config = defaultConfig();
 
     // Current section path, e.g. "" for top-level, "outputs", "effect", "effect.settings"
     var section: Section = .top;
+    var section_name: []const u8 = "";
+    var seen_sections = SeenNames{ .buf = undefined, .len = 0 };
+    var seen_keys = SeenKeys{ .buf = undefined, .len = 0 };
+    var saw_version = false;
 
     var line_num: usize = 0;
     var iter = std.mem.splitScalar(u8, content, '\n');
@@ -106,11 +168,22 @@ fn parseAndValidate(content: []const u8) !AppConfig {
 
         // Section header
         if (line[0] == '[') {
-            section = parseSectionHeader(line) orelse {
-                // Unknown section -- ignore for forward compatibility
-                section = .unknown;
-                continue;
+            const parsed_section = parseSectionHeader(line) orelse {
+                std.debug.print("config: line {}: malformed section header\n", .{line_num});
+                return error.MalformedConfig;
             };
+            seen_sections.add(parsed_section.name) catch |err| switch (err) {
+                error.DuplicateConfigEntry => {
+                    std.debug.print("config: line {}: duplicate section [{s}] is not allowed\n", .{ line_num, parsed_section.name });
+                    return error.DuplicateConfigEntry;
+                },
+                else => return err,
+            };
+            if (parsed_section.section == .unknown) {
+                std.debug.print("config: line {}: ignoring unknown section [{s}]\n", .{ line_num, parsed_section.name });
+            }
+            section = parsed_section.section;
+            section_name = parsed_section.name;
             continue;
         }
 
@@ -120,9 +193,22 @@ fn parseAndValidate(content: []const u8) !AppConfig {
             return error.MalformedConfig;
         };
 
+        seen_keys.add(section_name, kv.key) catch |err| switch (err) {
+            error.DuplicateConfigEntry => {
+                if (section == .top) {
+                    std.debug.print("config: line {}: duplicate key '{s}' is not allowed\n", .{ line_num, kv.key });
+                } else {
+                    std.debug.print("config: line {}: duplicate key '{s}.{s}' is not allowed\n", .{ line_num, section_name, kv.key });
+                }
+                return error.DuplicateConfigEntry;
+            },
+            else => return err,
+        };
+
         switch (section) {
             .top => {
                 if (std.mem.eql(u8, kv.key, "version")) {
+                    saw_version = true;
                     const v = parseInteger(kv.value) orelse {
                         std.debug.print("config: line {}: 'version' must be an integer\n", .{line_num});
                         return error.InvalidValue;
@@ -133,7 +219,7 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     }
                 } else if (std.mem.eql(u8, kv.key, "fps")) {
                     const fps = parseInteger(kv.value) orelse {
-                        std.debug.print("config: line {}: 'fps' must be an integer\n", .{line_num});
+                        std.debug.print("config: line {}: 'fps' must be a whole number between 1 and 120\n", .{line_num});
                         return error.InvalidValue;
                     };
                     if (fps < 1 or fps > 120) {
@@ -148,10 +234,13 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     // Clamp to at least 1ms so maybeAdvance is not stuck at 0
                     if (config.frame_advance_ms == 0) config.frame_advance_ms = 1;
                 } else {
-                    // Unknown top-level key -- ignore for forward compatibility
+                    std.debug.print("config: line {}: ignoring unknown top-level key '{s}'\n", .{ line_num, kv.key });
                 }
             },
             .outputs => {
+                // Reserved/internal compatibility field for v1. It is accepted so
+                // explicit configs can state the only supported policy today, but it
+                // is intentionally omitted from the public example surface for now.
                 if (std.mem.eql(u8, kv.key, "policy")) {
                     const val = parseQuotedString(kv.value) orelse {
                         std.debug.print("config: line {}: 'policy' must be a quoted string\n", .{line_num});
@@ -161,9 +250,14 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         std.debug.print("config: line {}: unsupported outputs.policy \"{s}\", only \"all\" is supported in v1\n", .{ line_num, val });
                         return error.UnsupportedPolicy;
                     }
+                } else {
+                    std.debug.print("config: line {}: ignoring unknown key 'outputs.{s}'\n", .{ line_num, kv.key });
                 }
             },
             .effect => {
+                // Reserved/internal compatibility field for v1. It is accepted so
+                // configs can pin the only supported effect today without widening
+                // the public surface beyond the example config.
                 if (std.mem.eql(u8, kv.key, "name")) {
                     const val = parseQuotedString(kv.value) orelse {
                         std.debug.print("config: line {}: 'name' must be a quoted string\n", .{line_num});
@@ -173,12 +267,14 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         std.debug.print("config: line {}: unsupported effect.name \"{s}\", only \"colormix\" is supported in v1\n", .{ line_num, val });
                         return error.UnsupportedEffect;
                     }
+                } else {
+                    std.debug.print("config: line {}: ignoring unknown key 'effect.{s}'\n", .{ line_num, kv.key });
                 }
             },
             .effect_settings => {
                 if (std.mem.eql(u8, kv.key, "palette")) {
                     const colors = parseStringArray(kv.value) orelse {
-                        std.debug.print("config: line {}: 'palette' must be an array of 3 hex color strings\n", .{line_num});
+                        std.debug.print("config: line {}: 'palette' must be an array of exactly 3 quoted '#RRGGBB' strings\n", .{line_num});
                         return error.InvalidValue;
                     };
                     if (colors.len != 3) {
@@ -187,26 +283,32 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     }
                     for (colors.items(), 0..) |color_str, i| {
                         config.palette[i] = parseHexColor(color_str) orelse {
-                            std.debug.print("config: line {}: invalid hex color \"{s}\" in palette\n", .{ line_num, color_str });
+                            std.debug.print("config: line {}: 'palette' entry {} must be a '#RRGGBB' color, got \"{s}\"\n", .{ line_num, i + 1, color_str });
                             return error.InvalidValue;
                         };
                     }
+                } else {
+                    std.debug.print("config: line {}: ignoring unknown key 'effect.settings.{s}'\n", .{ line_num, kv.key });
                 }
             },
             .renderer => {
                 if (std.mem.eql(u8, kv.key, "scale")) {
                     const scale = parseFloat(kv.value) orelse {
-                        std.debug.print("config: line {}: 'scale' must be a float\n", .{line_num});
+                        std.debug.print("config: line {}: 'renderer.scale' must be a number between 0.1 and 1.0\n", .{line_num});
                         return error.InvalidValue;
                     };
-                    if (scale < 0.1 or scale > 1.0) {
-                        std.debug.print("config: line {}: 'scale' must be between 0.1 and 1.0, got {d:.2}\n", .{ line_num, scale });
+                    if (!std.math.isFinite(scale) or scale < 0.1 or scale > 1.0) {
+                        std.debug.print("config: line {}: 'renderer.scale' must be between 0.1 and 1.0, got {d}\n", .{ line_num, scale });
+                        return error.InvalidValue;
+                    }
+                    if (scale < 1.0 and scale >= RENDERER_SCALE_NEAR_NATIVE_MIN) {
+                        std.debug.print("config: line {}: 'renderer.scale' values from {d} up to but not including 1.0 are too close to native; use a value below {d} or exactly 1.0\n", .{ line_num, RENDERER_SCALE_NEAR_NATIVE_MIN, RENDERER_SCALE_NEAR_NATIVE_MIN });
                         return error.InvalidValue;
                     }
                     config.renderer_scale = scale;
                 } else if (std.mem.eql(u8, kv.key, "upscale_filter")) {
                     const val = parseQuotedString(kv.value) orelse {
-                        std.debug.print("config: line {}: 'upscale_filter' must be a quoted string\n", .{line_num});
+                        std.debug.print("config: line {}: 'renderer.upscale_filter' must be \"nearest\" or \"linear\"\n", .{line_num});
                         return error.InvalidValue;
                     };
                     if (std.mem.eql(u8, val, "nearest")) {
@@ -214,15 +316,22 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     } else if (std.mem.eql(u8, val, "linear")) {
                         config.upscale_filter = .linear;
                     } else {
-                        std.debug.print("config: line {}: 'upscale_filter' must be \"nearest\" or \"linear\", got \"{s}\"\n", .{ line_num, val });
+                        std.debug.print("config: line {}: 'renderer.upscale_filter' must be \"nearest\" or \"linear\", got \"{s}\"\n", .{ line_num, val });
                         return error.InvalidValue;
                     }
+                } else {
+                    std.debug.print("config: line {}: ignoring unknown key 'renderer.{s}'\n", .{ line_num, kv.key });
                 }
             },
             .unknown => {
                 // Ignore keys in unknown sections
             },
         }
+    }
+
+    if (options.require_version and !saw_version) {
+        std.debug.print("config: existing config file is missing required top-level 'version = 1'\n", .{});
+        return error.UnsupportedVersion;
     }
 
     return config;
@@ -237,18 +346,24 @@ const Section = enum {
     unknown,
 };
 
-fn parseSectionHeader(line: []const u8) ?Section {
+const ParsedSection = struct {
+    section: Section,
+    name: []const u8,
+};
+
+fn parseSectionHeader(line: []const u8) ?ParsedSection {
     if (line.len < 2 or line[0] != '[') return null;
     // Find closing bracket
     const close = std.mem.indexOfScalar(u8, line, ']') orelse return null;
     if (close < 2) return null;
+    if (std.mem.trim(u8, line[close + 1 ..], &std.ascii.whitespace).len != 0) return null;
     const name = std.mem.trim(u8, line[1..close], &std.ascii.whitespace);
 
-    if (std.mem.eql(u8, name, "outputs")) return .outputs;
-    if (std.mem.eql(u8, name, "effect")) return .effect;
-    if (std.mem.eql(u8, name, "effect.settings")) return .effect_settings;
-    if (std.mem.eql(u8, name, "renderer")) return .renderer;
-    return null; // Unknown section
+    if (std.mem.eql(u8, name, "outputs")) return .{ .section = .outputs, .name = name };
+    if (std.mem.eql(u8, name, "effect")) return .{ .section = .effect, .name = name };
+    if (std.mem.eql(u8, name, "effect.settings")) return .{ .section = .effect_settings, .name = name };
+    if (std.mem.eql(u8, name, "renderer")) return .{ .section = .renderer, .name = name };
+    return .{ .section = .unknown, .name = name };
 }
 
 const KeyValue = struct {
@@ -280,6 +395,7 @@ fn parseQuotedString(value: []const u8) ?[]const u8 {
     if (value[0] != '"') return null;
     // Find the closing quote
     const close = std.mem.indexOfScalarPos(u8, value, 1, '"') orelse return null;
+    if (std.mem.trim(u8, value[close + 1 ..], &std.ascii.whitespace).len != 0) return null;
     return value[1..close];
 }
 
@@ -315,17 +431,27 @@ fn parseStringArray(value: []const u8) ?StringArray {
     if (value[0] != '[') return null;
     const close = std.mem.lastIndexOfScalar(u8, value, ']') orelse return null;
     if (close < 1) return null;
+    if (std.mem.trim(u8, value[close + 1 ..], &std.ascii.whitespace).len != 0) return null;
     const inner = value[1..close];
 
     var result = StringArray{ .buf = undefined, .len = 0 };
 
     var pos: usize = 0;
+    var needs_comma = false;
     while (pos < inner.len) {
-        // Skip whitespace and commas
-        while (pos < inner.len and (inner[pos] == ' ' or inner[pos] == ',' or inner[pos] == '\t')) {
+        while (pos < inner.len and std.ascii.isWhitespace(inner[pos])) {
             pos += 1;
         }
         if (pos >= inner.len) break;
+
+        if (needs_comma) {
+            if (inner[pos] != ',') return null;
+            pos += 1;
+            while (pos < inner.len and std.ascii.isWhitespace(inner[pos])) {
+                pos += 1;
+            }
+            if (pos >= inner.len) return null;
+        }
 
         if (inner[pos] != '"') return null; // Expected quoted string
         pos += 1; // skip opening quote
@@ -341,6 +467,7 @@ fn parseStringArray(value: []const u8) ?StringArray {
         if (result.len >= MAX_ARRAY_ELEMS) return null; // Too many elements
         result.buf[result.len] = str;
         result.len += 1;
+        needs_comma = true;
     }
 
     return result;
@@ -403,6 +530,10 @@ test "parseAndValidate full config" {
         \\version = 1
         \\fps = 30
         \\
+        \\[renderer]
+        \\scale = 1.0
+        \\upscale_filter = "nearest"
+        \\
         \\[outputs]
         \\policy = "all"
         \\
@@ -424,6 +555,11 @@ test "parseAndValidate full config" {
 test "parseAndValidate bad version" {
     const toml = "version = 2\n";
     try std.testing.expectError(error.UnsupportedVersion, parseAndValidate(toml));
+}
+
+test "parseAndValidate existing config requires version" {
+    const toml = "fps = 15\n";
+    try std.testing.expectError(error.UnsupportedVersion, parseAndValidateExistingConfig(toml));
 }
 
 test "parseAndValidate bad fps" {
@@ -459,6 +595,43 @@ test "parseAndValidate unknown keys and sections ignored" {
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
+test "parseAndValidate duplicate top-level key fails" {
+    const toml =
+        \\version = 1
+        \\fps = 15
+        \\fps = 30
+    ;
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfig(toml));
+}
+
+test "parseAndValidate duplicate section fails" {
+    const toml =
+        \\version = 1
+        \\
+        \\[renderer]
+        \\scale = 0.5
+        \\
+        \\[renderer]
+        \\upscale_filter = "nearest"
+    ;
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfig(toml));
+}
+
+test "parseAndValidate renderer scale must be finite" {
+    const toml = "[renderer]\nscale = inf\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate palette needs commas" {
+    const toml = "[effect.settings]\npalette = [\"#ff0000\" \"#00ff00\", \"#0000ff\"]\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate quoted values reject trailing junk" {
+    const toml = "[renderer]\nupscale_filter = \"nearest\" trailing\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
 test "parseStringArray basic" {
     const arr = parseStringArray("[\"a\", \"b\", \"c\"]").?;
     try std.testing.expectEqual(@as(usize, 3), arr.len);
@@ -479,6 +652,11 @@ test "parseAndValidate renderer scale" {
     const cfg = try parseAndValidate(toml);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), cfg.renderer_scale, 0.001);
     try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
+}
+
+test "parseAndValidate renderer scale near one is rejected" {
+    const toml = "[renderer]\nscale = 0.95\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
 }
 
 test "parseAndValidate renderer upscale_filter linear" {

@@ -1,0 +1,9 @@
+version = 1
+fps = 15
+
+[renderer]
+scale = 1.0
+upscale_filter = "nearest"
+
+[effect.settings]
+palette = ["#1e1e2e", "#89b4fa", "#a6e3a1"]
