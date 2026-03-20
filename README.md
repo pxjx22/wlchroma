@@ -5,7 +5,7 @@
 ## Requirements
 
 - Linux with a Wayland session
-- A compositor that supports `wlr-layer-shell`
+- A Wayland compositor that exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`)
 - Zig `0.15.2`
 - `wayland-scanner`
 - Development libraries for `wayland-client`, `wayland-egl`, `EGL`, and `GLESv2`
@@ -41,6 +41,51 @@ You can also build and run in one step:
 zig build run
 ```
 
+## Autostart
+
+Use an absolute path if `wlchroma` is not on your `PATH`.
+
+### niri
+
+Add this to your niri config:
+
+```kdl
+spawn-at-startup "wlchroma"
+```
+
+### sway
+
+If you want sway config reloads to also restart `wlchroma`, start it through a user service and use `exec_always`:
+
+```ini
+exec_always --no-startup-id systemctl --user restart wlchroma.service
+```
+
+### systemd --user
+
+Minimal unit example:
+
+```ini
+[Unit]
+Description=wlchroma animated wallpaper
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/absolute/path/to/wlchroma
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Save it as `~/.config/systemd/user/wlchroma.service`, then run:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now wlchroma.service
+```
+
 ## Configuration
 
 `wlchroma` looks for a config file in this order:
@@ -68,6 +113,7 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 ### Config Notes
 
 - `fps` defaults to `15`. That is an intentional low-power default for the wallpaper animation; it is not tied to your monitor refresh rate.
+- Config is loaded once at startup. There is no live config reload yet, so after changing `config.toml` you must restart `wlchroma`.
 - `renderer.scale = 1.0` renders at native resolution. Lower values render to a smaller offscreen image and then scale it up, which usually reduces GPU work but makes the result look softer or chunkier.
 - `renderer.scale` must be between `0.1` and `1.0`. Values from `0.95` up to but not including `1.0` are rejected.
 - `renderer.upscale_filter = "nearest"` keeps the upscaled image crisp and blocky. `"linear"` smooths it out, but can look blurrier.
@@ -77,13 +123,14 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 ## Limitations
 
 - Linux Wayland only; no X11 support
-- Requires a compositor with `wlr-layer-shell`
+- Requires a Wayland compositor that exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`)
 - The public v1 effect surface is intentionally small: one colormix effect with a 3-color palette
-- Multi-monitor output is supported, but all outputs use the same global config
+- Multi-monitor output is supported, but all outputs use the same global config; there is no per-output config yet
+- Outputs added after `wlchroma` starts do not get a wallpaper surface until you restart it
 
 ## Troubleshooting
 
-- If the app exits immediately, make sure you are running inside a Wayland session and your compositor supports `wlr-layer-shell`.
+- If the app exits immediately, make sure you are running inside a Wayland session and your compositor exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`).
 - If build linking fails, install the missing Wayland/EGL/GLES development packages and confirm `wayland-scanner` is on your `PATH`.
 - If a config file is ignored or rejected, check that it lives at one of the lookup paths above and starts with `version = 1`.
 - If GPU initialization fails, `wlchroma` should continue on the CPU/SHM fallback path, but reduced-resolution GPU scaling options will not apply.
