@@ -172,13 +172,15 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                 std.debug.print("config: line {}: malformed section header\n", .{line_num});
                 return error.MalformedConfig;
             };
-            seen_sections.add(parsed_section.name) catch |err| switch (err) {
-                error.DuplicateConfigEntry => {
-                    std.debug.print("config: line {}: duplicate section [{s}] is not allowed\n", .{ line_num, parsed_section.name });
-                    return error.DuplicateConfigEntry;
-                },
-                else => return err,
-            };
+            if (shouldTrackSection(parsed_section.section)) {
+                seen_sections.add(parsed_section.name) catch |err| switch (err) {
+                    error.DuplicateConfigEntry => {
+                        std.debug.print("config: line {}: duplicate section [{s}] is not allowed\n", .{ line_num, parsed_section.name });
+                        return error.DuplicateConfigEntry;
+                    },
+                    else => return err,
+                };
+            }
             if (parsed_section.section == .unknown) {
                 std.debug.print("config: line {}: ignoring unknown section [{s}]\n", .{ line_num, parsed_section.name });
             }
@@ -193,17 +195,19 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
             return error.MalformedConfig;
         };
 
-        seen_keys.add(section_name, kv.key) catch |err| switch (err) {
-            error.DuplicateConfigEntry => {
-                if (section == .top) {
-                    std.debug.print("config: line {}: duplicate key '{s}' is not allowed\n", .{ line_num, kv.key });
-                } else {
-                    std.debug.print("config: line {}: duplicate key '{s}.{s}' is not allowed\n", .{ line_num, section_name, kv.key });
-                }
-                return error.DuplicateConfigEntry;
-            },
-            else => return err,
-        };
+        if (shouldTrackKey(section, kv.key)) {
+            seen_keys.add(section_name, kv.key) catch |err| switch (err) {
+                error.DuplicateConfigEntry => {
+                    if (section == .top) {
+                        std.debug.print("config: line {}: duplicate key '{s}' is not allowed\n", .{ line_num, kv.key });
+                    } else {
+                        std.debug.print("config: line {}: duplicate key '{s}.{s}' is not allowed\n", .{ line_num, section_name, kv.key });
+                    }
+                    return error.DuplicateConfigEntry;
+                },
+                else => return err,
+            };
+        }
 
         switch (section) {
             .top => {
@@ -350,6 +354,21 @@ const ParsedSection = struct {
     section: Section,
     name: []const u8,
 };
+
+fn shouldTrackSection(section: Section) bool {
+    return section != .unknown;
+}
+
+fn shouldTrackKey(section: Section, key: []const u8) bool {
+    return switch (section) {
+        .top => std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "fps"),
+        .outputs => std.mem.eql(u8, key, "policy"),
+        .effect => std.mem.eql(u8, key, "name"),
+        .effect_settings => std.mem.eql(u8, key, "palette"),
+        .renderer => std.mem.eql(u8, key, "scale") or std.mem.eql(u8, key, "upscale_filter"),
+        .unknown => false,
+    };
+}
 
 fn parseSectionHeader(line: []const u8) ?ParsedSection {
     if (line.len < 2 or line[0] != '[') return null;
@@ -615,6 +634,45 @@ test "parseAndValidate duplicate section fails" {
         \\upscale_filter = "nearest"
     ;
     try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfig(toml));
+}
+
+test "parseAndValidate repeated unknown sections are ignored" {
+    const toml =
+        \\version = 1
+        \\
+        \\[future]
+        \\foo = 1
+        \\
+        \\[future]
+        \\foo = 2
+    ;
+    const cfg = try parseAndValidateExistingConfig(toml);
+    try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
+}
+
+test "parseAndValidate duplicate unknown keys are ignored" {
+    const toml =
+        \\version = 1
+        \\
+        \\[future]
+        \\foo = 1
+        \\foo = 2
+    ;
+    const cfg = try parseAndValidateExistingConfig(toml);
+    try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
+}
+
+test "parseAndValidate duplicate unknown key in known section is ignored" {
+    const toml =
+        \\version = 1
+        \\
+        \\[renderer]
+        \\future = 1
+        \\future = 2
+        \\scale = 1.0
+    ;
+    const cfg = try parseAndValidateExistingConfig(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
 }
 
 test "parseAndValidate renderer scale must be finite" {
