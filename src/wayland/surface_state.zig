@@ -38,9 +38,13 @@ pub const SurfaceState = struct {
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
     /// Copied from ColormixRenderer.palette_data at create() time. The palette
     /// is constant after ColormixRenderer.init() -- it never changes at runtime.
-    /// If palette hot-reload were added, this would need to be refreshed in
-    /// renderTick and re-uploaded to the shader via bind().
+    /// TODO: If palette is made runtime-configurable, palette_data and
+    /// ColormixRenderer.palette_data must be rebuilt and setStaticUniforms
+    /// re-called (plus shader bind() for the palette uniform).
     palette_data: [36]f32,
+    /// Set true on configure/resize so the next renderTick uploads static
+    /// uniforms (resolution, cos_mod, sin_mod) to the shader.
+    needs_static_uniforms: bool,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -91,6 +95,7 @@ pub const SurfaceState = struct {
             .egl_surface = null,
             .egl_ctx = egl_ctx,
             .palette_data = renderer.palette_data,
+            .needs_static_uniforms = true,
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -127,21 +132,23 @@ pub const SurfaceState = struct {
             const ctx = self.egl_ctx.?;
             if (!egl_surf.makeCurrent(ctx)) return;
 
-            // Advance shared renderer state every frame so the frame counter
-            // drives animation time, matching the CPU path exactly.
-            const now_ms = getMonotonicMs();
-            self.renderer.maybeAdvance(now_ms);
+            // Animation advance is handled by frameCallbackDone() using
+            // the compositor's presentation timestamp. Do NOT call
+            // maybeAdvance() here -- it would double-advance the frame
+            // counter per render cycle.
 
             if (shader) |sh| {
-                // glViewport is set once at configure / resize, not per-frame.
+                if (self.needs_static_uniforms) {
+                    sh.setStaticUniforms(
+                        @floatFromInt(self.pixel_w),
+                        @floatFromInt(self.pixel_h),
+                        self.renderer.pattern_cos_mod,
+                        self.renderer.pattern_sin_mod,
+                    );
+                    self.needs_static_uniforms = false;
+                }
                 const time = @as(f32, @floatFromInt(self.renderer.frames)) * defaults.TIME_SCALE;
-                sh.setUniforms(
-                    time,
-                    @floatFromInt(self.pixel_w),
-                    @floatFromInt(self.pixel_h),
-                    self.renderer.pattern_cos_mod,
-                    self.renderer.pattern_sin_mod,
-                );
+                sh.setUniforms(time);
                 sh.draw();
             } else {
                 // Shader not ready yet, keep the black clear as fallback
@@ -152,7 +159,10 @@ pub const SurfaceState = struct {
             // Arm frame callback BEFORE eglSwapBuffers so the
             // wl_surface_frame request is included in the same commit
             // that swap triggers internally.
-            const cb = c.wl_surface_frame(wl_surface);
+            const cb = c.wl_surface_frame(wl_surface) orelse {
+                std.debug.print("wl_surface_frame returned null (OOM), skipping callback arm\n", .{});
+                return;
+            };
             self.frame_callback = cb;
             _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
 
@@ -188,7 +198,14 @@ pub const SurfaceState = struct {
 
         // Arm frame callback to track when compositor presents this buffer.
         // The callback does NOT trigger rendering -- only clears the flag.
-        const cb = c.wl_surface_frame(wl_surface);
+        const cb = c.wl_surface_frame(wl_surface) orelse {
+            std.debug.print("wl_surface_frame returned null (OOM), skipping callback arm\n", .{});
+            // Continue with commit -- the frame will display, but the next
+            // renderTick will fire without backpressure gating (frame_callback
+            // stays null). This is acceptable as a transient OOM recovery.
+            c.wl_surface_commit(wl_surface);
+            return;
+        };
         self.frame_callback = cb;
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
 
@@ -281,6 +298,8 @@ fn layerSurfaceConfigure(
             } else {
                 std.debug.print("configure: makeCurrent failed during resize, viewport not updated\n", .{});
             }
+            // Static uniforms (resolution) must be re-uploaded on next renderTick.
+            self.needs_static_uniforms = true;
         } else {
             // First configure: create the EGL surface
             self.egl_surface = EglSurface.create(ctx, wl_surface_egl, pw, ph) catch |err| blk: {
@@ -309,9 +328,13 @@ fn layerSurfaceConfigure(
 
                 // Destroy any stale callback, then arm before swap
                 if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
-                const cb = c.wl_surface_frame(wl_surface_egl);
-                self.frame_callback = cb;
-                _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+                if (c.wl_surface_frame(wl_surface_egl)) |cb| {
+                    self.frame_callback = cb;
+                    _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+                } else {
+                    std.debug.print("configure: wl_surface_frame returned null (OOM)\n", .{});
+                    self.frame_callback = null;
+                }
 
                 _ = egl_surf.swapBuffers();
             }
@@ -383,9 +406,13 @@ fn layerSurfaceConfigure(
 
     // Destroy any stale callback, then request next frame BEFORE commit
     if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
-    const cb = c.wl_surface_frame(wl_surface);
-    self.frame_callback = cb;
-    _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+    if (c.wl_surface_frame(wl_surface)) |cb| {
+        self.frame_callback = cb;
+        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+    } else {
+        std.debug.print("configure: wl_surface_frame returned null (OOM)\n", .{});
+        self.frame_callback = null;
+    }
 
     c.wl_surface_commit(wl_surface);
     self.configured = true;

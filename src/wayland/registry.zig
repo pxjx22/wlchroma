@@ -88,8 +88,13 @@ fn registryGlobalRemove(
 ) callconv(.c) void {
     _ = data;
     _ = registry;
-    // Hot-unplug handling is deferred -- it would require removing the
-    // output's SurfaceState and restructuring the main loop. Log the
-    // event so it is at least visible during development.
+    // Hot-unplug handling is deferred. Full support would require:
+    //   1. Matching `name` back to the OutputInfo/SurfaceState that owns it
+    //   2. Tearing down the EGL surface, SHM pool, and layer surface
+    //   3. Removing the entry from the surfaces ArrayList (invalidating ptrs)
+    // Since this is a wallpaper daemon that typically runs for the session
+    // lifetime, logging and continuing is acceptable. The compositor will
+    // close the layer surface if the output goes away, triggering
+    // layerSurfaceClosed -> clean shutdown.
     std.debug.print("registry: global {} removed (hot-unplug handling deferred)\n", .{name});
 }

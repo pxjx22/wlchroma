@@ -62,6 +62,9 @@ pub const EglContext = struct {
         _ = c.eglMakeCurrent(self.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
         _ = c.eglDestroyContext(self.display, self.context);
         _ = c.eglTerminate(self.display);
+        // Release per-thread EGL state (TLS, error codes). Safe to call even
+        // if no context is current; required for clean valgrind/ASAN exits.
+        _ = c.eglReleaseThread();
         self.display = c.EGL_NO_DISPLAY;
         self.context = c.EGL_NO_CONTEXT;
     }

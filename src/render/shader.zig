@@ -15,6 +15,13 @@ pub const ShaderProgram = struct {
     u_palette_loc: c.GLint,
     /// Debug-only flag: set to true after bind() is called. draw() asserts
     /// this in debug builds to catch missing bind() calls.
+    ///
+    /// bind() uploads invariant GL state (program, VBO, vertex layout, palette)
+    /// once per EGL context. If the EGL context is ever destroyed and recreated,
+    /// bind() must be called again on the new context. deinit() does NOT reset
+    /// this flag -- after deinit(), the ShaderProgram must not be used (the GL
+    /// objects are deleted). In debug builds, draw() will assert(self.bound)
+    /// which catches use-after-deinit only if the memory is zeroed/reused.
     bound: bool,
 
     // Vertex shader: pass-through, position from attribute
@@ -165,20 +172,25 @@ pub const ShaderProgram = struct {
         self.bound = true;
     }
 
-    /// Upload per-frame uniforms for the colormix shader.
-    /// The palette uniform is static and uploaded once in bind().
-    pub fn setUniforms(
+    /// Upload invariant uniforms that only change on configure/resize.
+    /// Call once after bind() and again on each resize.
+    pub fn setStaticUniforms(
         self: *const ShaderProgram,
-        time: f32,
         resolution_w: f32,
         resolution_h: f32,
         cos_mod: f32,
         sin_mod: f32,
     ) void {
-        c.glUniform1f(self.u_time_loc, time);
         c.glUniform2f(self.u_resolution_loc, resolution_w, resolution_h);
         c.glUniform1f(self.u_cos_mod_loc, cos_mod);
         c.glUniform1f(self.u_sin_mod_loc, sin_mod);
+    }
+
+    /// Upload per-frame uniforms for the colormix shader.
+    /// Only u_time changes every frame; resolution, cos_mod, sin_mod are
+    /// uploaded once via setStaticUniforms().
+    pub fn setUniforms(self: *const ShaderProgram, time: f32) void {
+        c.glUniform1f(self.u_time_loc, time);
     }
 
     /// Draw the fullscreen quad. Assumes bind() was called once and

@@ -127,20 +127,29 @@ pub const App = struct {
         }
 
         // --- poll+timerfd main loop ---
-        // Create a timerfd that fires every 33ms (~30fps) using CLOCK_MONOTONIC.
-        // This replaces vblank-rate wakeups with render-rate wakeups.
-        //
-        // NOTE: 33ms is a known simplification. The actual output refresh rate
-        // (stored in OutputInfo.refresh_mhz) may differ. Plumbing per-output
-        // refresh into per-output timers would require restructuring the main
-        // loop -- deferred for now. The refresh rate is logged at startup above.
+        // Create a timerfd that fires at the render rate using CLOCK_MONOTONIC.
+        // Derive interval from the fastest output's refresh rate so we can
+        // produce frames at the display's native cadence. Falls back to ~30fps
+        // (33ms) if no output reports a refresh rate.
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
-        // Arm: first fire in 33ms, repeat every 33ms
+        // Find max refresh_mhz across all outputs to determine timer cadence.
+        var max_refresh_mhz: i32 = 0;
+        for (self.outputs.items) |*out| {
+            if (out.done and out.refresh_mhz > max_refresh_mhz) {
+                max_refresh_mhz = out.refresh_mhz;
+            }
+        }
+        const timer_ns: u32 = if (max_refresh_mhz > 0)
+            @intCast(@divFloor(@as(u64, 1_000_000_000_000), @as(u64, @intCast(max_refresh_mhz))))
+        else
+            33_333_333; // ~30fps fallback
+        std.debug.print("timer interval: {}ns (from max refresh {}mHz)\n", .{ timer_ns, max_refresh_mhz });
+
         const interval = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = 33_333_333 },
-            .it_interval = .{ .sec = 0, .nsec = 33_333_333 },
+            .it_value = .{ .sec = 0, .nsec = timer_ns },
+            .it_interval = .{ .sec = 0, .nsec = timer_ns },
         };
         try posix.timerfd_settime(tfd, .{}, &interval, null);
 
@@ -208,7 +217,13 @@ pub const App = struct {
             // configure, buffer release, etc.)
             _ = c.wl_display_dispatch_pending(self.display);
 
-            // Timer tick -- attempt render on all surfaces
+            // Timer tick -- attempt render on all surfaces.
+            // When all surfaces are backpressured (frame_callback != null),
+            // renderTick returns immediately for each surface, making this
+            // wakeup a cheap no-op (drain timerfd + iterate surfaces). A
+            // future optimization could disarm the timerfd while all surfaces
+            // are backpressured and re-arm on the next frame callback, but
+            // the overhead is negligible for the current surface count.
             if (fds[1].revents & linux.POLL.IN != 0) {
                 // Drain the timerfd (8-byte expiration count)
                 var buf: [8]u8 = undefined;

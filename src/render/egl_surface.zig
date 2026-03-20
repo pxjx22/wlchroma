@@ -2,6 +2,16 @@ const std = @import("std");
 const c = @import("../wl.zig").c;
 const EglContext = @import("egl_context.zig").EglContext;
 
+comptime {
+    // EGLNativeWindowType is c_ulong on Wayland/X11 EGL platforms.
+    // We cast wl_egl_window pointers to it via @intFromPtr, which is
+    // only safe if pointers and c_ulong have the same size.
+    if (@sizeOf(c.EGLNativeWindowType) != @sizeOf(*anyopaque)) {
+        @compileError("EGLNativeWindowType size differs from pointer size; " ++
+            "@intFromPtr cast in EglSurface.create is not safe on this platform");
+    }
+}
+
 pub const EglSurface = struct {
     egl_window: *c.wl_egl_window,
     egl_surface: c.EGLSurface,

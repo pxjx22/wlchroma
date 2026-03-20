@@ -16,7 +16,46 @@ pub const ShmPool = struct {
         const buf_size: usize = stride * @as(usize, height);
         const total_size = buf_size * 2;
 
-        // memfd_create with MFD_CLOEXEC = 1
+        // Guard against i32 overflow: wl_shm_create_pool takes i32 size.
+        if (total_size > @as(usize, @intCast(std.math.maxInt(i32)))) {
+            return error.ShmTooLarge;
+        }
+
+        var self = try initResources(shm, width, height, stride, buf_size, total_size);
+        // deinit handles all cleanup: buffers (null-checked), pool, mmap, fd.
+        errdefer self.deinit();
+
+        for (0..2) |i| {
+            const offset: i32 = @intCast(i * buf_size);
+            const buf = c.wl_shm_pool_create_buffer(
+                self.pool.?,
+                offset,
+                @intCast(width),
+                @intCast(height),
+                @intCast(stride),
+                c.WL_SHM_FORMAT_XRGB8888,
+            ) orelse return error.BufferCreateFailed;
+            self.buffers[i] = buf;
+        }
+
+        return self;
+    }
+
+    /// Allocate fd, mmap, and wl_shm_pool. Separated from init so that a
+    /// single errdefer self.deinit() in init covers buffer creation failures
+    /// without risking double-close of fd or double-munmap.
+    fn initResources(
+        shm: *c.wl_shm,
+        width: u32,
+        height: u32,
+        stride: usize,
+        buf_size: usize,
+        total_size: usize,
+    ) !ShmPool {
+        _ = width;
+        _ = height;
+        _ = stride;
+
         const fd = try posix.memfd_create("ly-colormix-shm", 1);
         errdefer posix.close(fd);
 
@@ -30,15 +69,15 @@ pub const ShmPool = struct {
             fd,
             0,
         );
+        errdefer posix.munmap(mmap_result);
 
-        // Correction #4: cast fd and size to i32 for C API
         const pool = c.wl_shm_create_pool(shm, @as(i32, @intCast(fd)), @as(i32, @intCast(total_size))) orelse {
-            posix.munmap(mmap_result);
-            posix.close(fd);
             return error.ShmPoolFailed;
         };
 
-        var self = ShmPool{
+        // Successful return: caller takes ownership of all resources via
+        // the returned ShmPool struct. errdefers do not fire on success.
+        return ShmPool{
             .pool = pool,
             .buffers = .{ null, null },
             .busy = .{ false, false },
@@ -46,21 +85,6 @@ pub const ShmPool = struct {
             .buf_size = buf_size,
             .fd = fd,
         };
-
-        for (0..2) |i| {
-            const offset: i32 = @intCast(i * buf_size);
-            const buf = c.wl_shm_pool_create_buffer(
-                pool,
-                offset,
-                @intCast(width),
-                @intCast(height),
-                @intCast(stride),
-                c.WL_SHM_FORMAT_XRGB8888,
-            ) orelse return error.BufferCreateFailed;
-            self.buffers[i] = buf;
-        }
-
-        return self;
     }
 
     /// Register wl_buffer release listeners with caller-provided userdata

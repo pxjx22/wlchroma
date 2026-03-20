@@ -15,6 +15,9 @@ pub const ColormixRenderer = struct {
     last_advance_ms: u32,
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
     /// Computed once at init from the palette; shared across all outputs.
+    /// TODO: If palette is made runtime-configurable, palette_data must be
+    /// rebuilt and SurfaceState.palette_data updated, then setStaticUniforms
+    /// re-called (plus shader bind() for the palette uniform).
     palette_data: [36]f32,
 
     pub fn init(col1: Rgb, col2: Rgb, col3: Rgb) ColormixRenderer {
@@ -74,6 +77,8 @@ pub const ColormixRenderer = struct {
                 const len = vecLength(uvx, uvy);
                 const palette_index = @mod(@as(usize, @intFromFloat(@floor(len * 5.0))), PALETTE_LEN);
                 const cell = self.palette[palette_index];
+                // Column-major layout: x is the outer index, y is the inner.
+                // This matches the iteration order in framebuffer.expandCells.
                 out[x * grid_h + y] = palette_mod.blend(cell.fg, cell.bg, cell.alpha);
             }
         }
