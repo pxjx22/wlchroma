@@ -1,8 +1,11 @@
 version = 1
+# Intentional low-power default. This is animation cadence, not monitor refresh.
 fps = 15
 
 [renderer]
+# 1.0 = native resolution. Lower values render smaller, then upscale.
 scale = 1.0
+# "nearest" looks crisper/blockier; "linear" looks smoother/softer.
 upscale_filter = "nearest"
 
 [effect.settings]
