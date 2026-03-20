@@ -2,11 +2,18 @@ const std = @import("std");
 const defaults = @import("defaults.zig");
 const Rgb = defaults.Rgb;
 
+pub const UpscaleFilter = enum {
+    nearest,
+    linear,
+};
+
 pub const AppConfig = struct {
     fps: u32,
     frame_interval_ns: u32,
     frame_advance_ms: u32,
     palette: [3]Rgb,
+    renderer_scale: f32,
+    upscale_filter: UpscaleFilter,
 };
 
 pub fn defaultConfig() AppConfig {
@@ -15,6 +22,8 @@ pub fn defaultConfig() AppConfig {
         .frame_interval_ns = defaults.FRAME_INTERVAL_NS,
         .frame_advance_ms = defaults.FRAME_ADVANCE_MS,
         .palette = .{ defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3 },
+        .renderer_scale = 1.0,
+        .upscale_filter = .nearest,
     };
 }
 
@@ -184,6 +193,32 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     }
                 }
             },
+            .renderer => {
+                if (std.mem.eql(u8, kv.key, "scale")) {
+                    const scale = parseFloat(kv.value) orelse {
+                        std.debug.print("config: line {}: 'scale' must be a float\n", .{line_num});
+                        return error.InvalidValue;
+                    };
+                    if (scale < 0.1 or scale > 1.0) {
+                        std.debug.print("config: line {}: 'scale' must be between 0.1 and 1.0, got {d:.2}\n", .{ line_num, scale });
+                        return error.InvalidValue;
+                    }
+                    config.renderer_scale = scale;
+                } else if (std.mem.eql(u8, kv.key, "upscale_filter")) {
+                    const val = parseQuotedString(kv.value) orelse {
+                        std.debug.print("config: line {}: 'upscale_filter' must be a quoted string\n", .{line_num});
+                        return error.InvalidValue;
+                    };
+                    if (std.mem.eql(u8, val, "nearest")) {
+                        config.upscale_filter = .nearest;
+                    } else if (std.mem.eql(u8, val, "linear")) {
+                        config.upscale_filter = .linear;
+                    } else {
+                        std.debug.print("config: line {}: 'upscale_filter' must be \"nearest\" or \"linear\", got \"{s}\"\n", .{ line_num, val });
+                        return error.InvalidValue;
+                    }
+                }
+            },
             .unknown => {
                 // Ignore keys in unknown sections
             },
@@ -198,6 +233,7 @@ const Section = enum {
     outputs,
     effect,
     effect_settings,
+    renderer,
     unknown,
 };
 
@@ -211,6 +247,7 @@ fn parseSectionHeader(line: []const u8) ?Section {
     if (std.mem.eql(u8, name, "outputs")) return .outputs;
     if (std.mem.eql(u8, name, "effect")) return .effect;
     if (std.mem.eql(u8, name, "effect.settings")) return .effect_settings;
+    if (std.mem.eql(u8, name, "renderer")) return .renderer;
     return null; // Unknown section
 }
 
@@ -231,6 +268,11 @@ fn parseKeyValue(line: []const u8) ?KeyValue {
 fn parseInteger(value: []const u8) ?i64 {
     if (value.len == 0) return null;
     return std.fmt.parseInt(i64, value, 10) catch null;
+}
+
+fn parseFloat(value: []const u8) ?f32 {
+    if (value.len == 0) return null;
+    return std.fmt.parseFloat(f32, value) catch null;
 }
 
 fn parseQuotedString(value: []const u8) ?[]const u8 {
@@ -430,6 +472,41 @@ test "frame_advance_ms jitter margin" {
     const toml = "fps = 15\n";
     const cfg = try parseAndValidate(toml);
     try std.testing.expectEqual(@as(u32, 60), cfg.frame_advance_ms);
+}
+
+test "parseAndValidate renderer scale" {
+    const toml = "[renderer]\nscale = 0.5\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), cfg.renderer_scale, 0.001);
+    try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
+}
+
+test "parseAndValidate renderer upscale_filter linear" {
+    const toml = "[renderer]\nupscale_filter = \"linear\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(UpscaleFilter.linear, cfg.upscale_filter);
+}
+
+test "parseAndValidate renderer scale too low" {
+    const toml = "[renderer]\nscale = 0.05\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate renderer scale too high" {
+    const toml = "[renderer]\nscale = 1.5\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate renderer invalid filter" {
+    const toml = "[renderer]\nupscale_filter = \"bicubic\"\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate missing renderer section uses defaults" {
+    const toml = "fps = 15\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
+    try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
 }
 
 test "frame_advance_ms at 120fps" {

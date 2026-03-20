@@ -8,7 +8,11 @@ const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
 const EglSurface = @import("../render/egl_surface.zig").EglSurface;
 const EglContext = @import("../render/egl_context.zig").EglContext;
-const ShaderProgram = @import("../render/shader.zig").ShaderProgram;
+const shader_mod = @import("../render/shader.zig");
+const ShaderProgram = shader_mod.ShaderProgram;
+const BlitShader = shader_mod.BlitShader;
+const Offscreen = @import("../render/offscreen.zig").Offscreen;
+const UpscaleFilter = @import("../config/config.zig").UpscaleFilter;
 
 /// Context passed as userdata to each wl_buffer release listener.
 /// Carries a pointer back into ShmPool.busy[i] so acquireBuffer
@@ -48,6 +52,11 @@ pub const SurfaceState = struct {
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
+    /// Offscreen FBO for reduced-resolution rendering. null when
+    /// renderer_scale == 1.0 or when FBO creation failed.
+    offscreen: ?Offscreen,
+    renderer_scale: f32,
+    upscale_filter: UpscaleFilter,
     /// Set true when the layer surface is closed by the compositor (e.g.
     /// output unplug). Resources are torn down in layerSurfaceClosed;
     /// renderTick and deinit skip work when this is true.
@@ -78,6 +87,8 @@ pub const SurfaceState = struct {
         renderer: *ColormixRenderer,
         running: *bool,
         egl_ctx: ?*const EglContext,
+        renderer_scale: f32,
+        upscale_filter: UpscaleFilter,
     ) !SurfaceState {
         const layer_surf = try LayerSurface.create(compositor, layer_shell, out.wl_output, "wallpaper");
 
@@ -101,6 +112,9 @@ pub const SurfaceState = struct {
             .palette_data = renderer.palette_data,
             .needs_static_uniforms = true,
             .buf_ctx = undefined, // initialized after shm_pool is stable
+            .offscreen = null,
+            .renderer_scale = renderer_scale,
+            .upscale_filter = upscale_filter,
             .dead = false,
         };
     }
@@ -122,7 +136,7 @@ pub const SurfaceState = struct {
     /// (frame_callback == null) and a buffer is available.
     /// Render one frame. The shader pointer is passed per-call to avoid
     /// storing a borrowed pointer on the struct.
-    pub fn renderTick(self: *SurfaceState, shader: ?*const ShaderProgram) void {
+    pub fn renderTick(self: *SurfaceState, shader: ?*const ShaderProgram, blit_shader: ?*const BlitShader) void {
         if (self.dead) return;
         if (!self.configured) return;
 
@@ -152,8 +166,25 @@ pub const SurfaceState = struct {
                     self.needs_static_uniforms = false;
                 }
                 const time = @as(f32, @floatFromInt(self.renderer.frames)) * defaults.TIME_SCALE;
-                sh.setUniforms(time, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
-                sh.draw();
+
+                if (self.offscreen) |*ofs| {
+                    // Offscreen pass: render colormix at reduced resolution
+                    ofs.bind();
+                    c.glViewport(0, 0, @intCast(ofs.width), @intCast(ofs.height));
+                    sh.setUniforms(time, @floatFromInt(ofs.width), @floatFromInt(ofs.height));
+                    sh.draw();
+
+                    // Upscale pass: blit FBO texture to default framebuffer
+                    ofs.unbind();
+                    c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
+                    if (blit_shader) |bs| {
+                        bs.draw(ofs.tex, sh.program, sh.vbo, sh.a_pos_loc);
+                    }
+                } else {
+                    // Direct render at full resolution (scale == 1.0)
+                    sh.setUniforms(time, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
+                    sh.draw();
+                }
             } else {
                 // Shader not ready yet, keep the black clear as fallback
                 c.glClearColor(0.0, 0.0, 0.0, 1.0);
@@ -248,6 +279,11 @@ pub const SurfaceState = struct {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
         }
+        // Tear down offscreen FBO before EGL surface.
+        if (self.offscreen) |*ofs| {
+            ofs.deinit();
+            self.offscreen = null;
+        }
         // Tear down EGL surface before the layer surface (wl_surface)
         // is destroyed. EglContext.deinit happens later in App.deinit.
         if (self.egl_surface) |*egl_surf| {
@@ -334,6 +370,26 @@ fn layerSurfaceConfigure(
                     // Set viewport once at creation; updated on resize above.
                     c.glViewport(0, 0, @intCast(pw), @intCast(ph));
                 }
+            }
+        }
+
+        // Create or resize offscreen FBO for reduced-resolution rendering.
+        if (self.egl_surface != null and self.renderer_scale < 1.0) {
+            const rw = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(pw)) * self.renderer_scale)));
+            const rh = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(ph)) * self.renderer_scale)));
+            if (self.offscreen) |*ofs| {
+                ofs.resize(rw, rh);
+            } else {
+                self.offscreen = Offscreen.init(rw, rh, self.upscale_filter) catch |err| blk: {
+                    std.debug.print("Offscreen.init failed: {}, rendering at full resolution\n", .{err});
+                    break :blk null;
+                };
+            }
+        } else {
+            // scale == 1.0 or no EGL surface: no FBO needed
+            if (self.offscreen) |*ofs| {
+                ofs.deinit();
+                self.offscreen = null;
             }
         }
 

@@ -7,9 +7,13 @@ const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const EglContext = @import("render/egl_context.zig").EglContext;
-const ShaderProgram = @import("render/shader.zig").ShaderProgram;
+const shader_mod = @import("render/shader.zig");
+const ShaderProgram = shader_mod.ShaderProgram;
+const BlitShader = shader_mod.BlitShader;
 const defaults = @import("config/defaults.zig");
-const AppConfig = @import("config/config.zig").AppConfig;
+const config_mod = @import("config/config.zig");
+const AppConfig = config_mod.AppConfig;
+const UpscaleFilter = config_mod.UpscaleFilter;
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -20,8 +24,11 @@ pub const App = struct {
     renderer: ColormixRenderer,
     egl_ctx: ?EglContext,
     shader: ?ShaderProgram,
+    blit_shader: ?BlitShader,
     running: bool,
     frame_interval_ns: u32,
+    renderer_scale: f32,
+    upscale_filter: UpscaleFilter,
 
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) !App {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
@@ -36,8 +43,11 @@ pub const App = struct {
             .renderer = ColormixRenderer.init(config.palette[0], config.palette[1], config.palette[2], config.frame_advance_ms),
             .egl_ctx = null,
             .shader = null,
+            .blit_shader = null,
             .running = true,
             .frame_interval_ns = config.frame_interval_ns,
+            .renderer_scale = config.renderer_scale,
+            .upscale_filter = config.upscale_filter,
         };
         errdefer app.registry.deinit();
         errdefer {
@@ -104,6 +114,8 @@ pub const App = struct {
                 &self.renderer,
                 &self.running,
                 if (self.egl_ctx) |*ctx| ctx else null,
+                self.renderer_scale,
+                self.upscale_filter,
             );
             try self.surfaces.append(self.allocator, surface_state);
         }
@@ -137,6 +149,18 @@ pub const App = struct {
                     // layout. Persists across frames for this single-program
                     // setup. draw() only uploads per-frame uniforms.
                     if (self.shader) |*sh| sh.bind(&self.renderer.palette_data);
+
+                    // Initialize blit shader for offscreen upscale pass.
+                    // Only needed when renderer_scale < 1.0, but init is cheap
+                    // and keeps the code unconditional.
+                    if (self.renderer_scale < 1.0) {
+                        self.blit_shader = BlitShader.init() catch |err| blk: {
+                            std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
+                            break :blk null;
+                        };
+                        if (self.blit_shader) |*bs| bs.bind();
+                    }
+
                     shader_ready = true;
                     break;
                 }
@@ -240,8 +264,9 @@ pub const App = struct {
                 _ = posix.read(tfd, &buf) catch {};
 
                 const sh_ptr: ?*const ShaderProgram = if (self.shader) |*sh| sh else null;
+                const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
                 for (self.surfaces.items) |*s| {
-                    s.renderTick(sh_ptr);
+                    s.renderTick(sh_ptr, blit_ptr);
                 }
 
                 // If all surfaces are dead (e.g. all outputs unplugged),
@@ -276,6 +301,8 @@ pub const App = struct {
                 }
             }
         }
+        if (self.blit_shader) |*bs| bs.deinit();
+        self.blit_shader = null;
         if (self.shader) |*sh| sh.deinit();
         self.shader = null;
 
