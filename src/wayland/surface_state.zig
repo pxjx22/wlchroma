@@ -112,7 +112,7 @@ pub const SurfaceState = struct {
         c.wl_surface_commit(self.layer_surface.wl_surface);
     }
 
-    /// Called by the timerfd tick in the main loop (~30fps).
+    /// Called by the timerfd tick in the main loop (~15fps).
     /// Renders a new frame if the compositor has presented the previous one
     /// (frame_callback == null) and a buffer is available.
     /// Render one frame. The shader pointer is passed per-call to avoid
@@ -187,9 +187,13 @@ pub const SurfaceState = struct {
             return;
         };
 
-        // Advance animation state and render
-        const now_ms = getMonotonicMs();
-        self.renderer.maybeAdvance(now_ms);
+        // Advance animation state and render.
+        // EGL path advances from frameCallbackDone (compositor timestamps).
+        // SHM path advances from getMonotonicMs() here. Both feed
+        // maybeAdvance which is the single frame-advance gate.
+        if (getMonotonicMs()) |now_ms| {
+            self.renderer.maybeAdvance(now_ms);
+        }
         self.renderer.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
         framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), self.pixel_w, self.pixel_h);
 
@@ -213,12 +217,14 @@ pub const SurfaceState = struct {
     }
 
     /// Read CLOCK_MONOTONIC and return milliseconds (wrapping u32).
-    fn getMonotonicMs() u32 {
+    /// Returns null on failure so callers can skip time-dependent logic
+    /// rather than feeding a bogus 0 into maybeAdvance.
+    fn getMonotonicMs() ?u32 {
         var ts: std.os.linux.timespec = undefined;
         const rc = std.os.linux.clock_gettime(.MONOTONIC, &ts);
         if (rc != 0) {
             std.debug.print("clock_gettime failed: rc={}\n", .{rc});
-            return 0;
+            return null;
         }
         const ms: u64 = @intCast(ts.sec * 1000 + @divFloor(ts.nsec, 1_000_000));
         return @truncate(ms);
@@ -290,7 +296,9 @@ fn layerSurfaceConfigure(
             return;
         };
         if (self.egl_surface) |*existing| {
-            // Resize the existing EGL window -- no need to recreate EGLSurface
+            // Resize the existing EGL window -- no need to recreate EGLSurface.
+            // eglSwapInterval is context-local (EGL spec 3.7.3), not per-surface,
+            // so the interval=0 set at creation persists across resizes.
             existing.resize(pw, ph);
             // Update viewport to match new dimensions. Context must be current.
             if (existing.makeCurrent(ctx)) {

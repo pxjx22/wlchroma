@@ -23,6 +23,9 @@ pub const ShmPool = struct {
 
         var self = try initResources(shm, width, height, stride, buf_size, total_size);
         // deinit handles all cleanup: buffers (null-checked), pool, mmap, fd.
+        // Partial failure (e.g. buffer[1] create fails after buffer[0] succeeds)
+        // is safe because initResources returns buffers = {null, null} and deinit
+        // skips null entries in the buffers array.
         errdefer self.deinit();
 
         for (0..2) |i| {

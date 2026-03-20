@@ -18,6 +18,7 @@ pub const EglContext = struct {
         if (c.eglInitialize(egl_display, &major, &minor) == c.EGL_FALSE) {
             return error.EglInitFailed;
         }
+        errdefer _ = c.eglTerminate(egl_display);
         std.debug.print("EGL {}.{} initialized\n", .{ major, minor });
 
         // 3. Bind OpenGL ES API

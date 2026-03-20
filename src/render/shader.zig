@@ -126,6 +126,7 @@ pub const ShaderProgram = struct {
         };
         var vbo: c.GLuint = 0;
         c.glGenBuffers(1, &vbo);
+        errdefer c.glDeleteBuffers(1, &vbo);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
         c.glBufferData(
             c.GL_ARRAY_BUFFER,

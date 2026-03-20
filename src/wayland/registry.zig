@@ -55,6 +55,8 @@ fn registryGlobal(
     if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_compositor_interface.name, 0))) {
         self.compositor = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_compositor_interface, 4));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_shm_interface.name, 0))) {
+        // wl_shm is bound even on the EGL path as a fallback; if EGL init
+        // fails, the CPU/SHM path uses it for software rendering.
         self.shm = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_shm_interface, 1));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.zwlr_layer_shell_v1_interface.name, 0))) {
         self.layer_shell = @ptrCast(c.wl_registry_bind(registry, name, &c.zwlr_layer_shell_v1_interface, 4));

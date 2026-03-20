@@ -30,6 +30,7 @@ pub fn expandCells(
             if (px_start >= pw) break;
             const px_limit = @min(px_end, pw);
 
+            // Column-major: x is outer index, y is inner (matches colormix.zig renderGrid).
             const color = cells[cx * grid_h + cy];
             const pixel: [4]u8 = .{ color.b, color.g, color.r, 0x00 };
 

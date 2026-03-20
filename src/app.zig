@@ -23,6 +23,7 @@ pub const App = struct {
 
     pub fn init(allocator: std.mem.Allocator) !App {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
+        errdefer c.wl_display_disconnect(display);
 
         var app = App{
             .allocator = allocator,
@@ -35,6 +36,12 @@ pub const App = struct {
             .shader = null,
             .running = true,
         };
+        errdefer app.registry.deinit();
+        errdefer {
+            for (app.outputs.items) |*out| out.deinit();
+            app.outputs.deinit(allocator);
+        }
+        errdefer if (app.egl_ctx) |*ctx| ctx.deinit();
 
         try app.registry.bind(display, &app.outputs, allocator);
 
@@ -128,12 +135,13 @@ pub const App = struct {
 
         // --- poll+timerfd main loop ---
         // Create a timerfd that fires at a fixed 15fps (~66.7ms) cadence.
-        // This is an intentionally low-power, choppy/ASCII-vibe wallpaper;
-        // the interval is independent of the output refresh rate.
+        // Fixed 15fps is intentional: this is a low-power wallpaper engine
+        // targeting an ASCII/TUI aesthetic. Output refresh rates are stored
+        // in OutputInfo.refresh_mhz but are intentionally not used for pacing.
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
-        const timer_ns: u32 = 66_666_667; // 1_000_000_000 / 15 -- fixed 15fps
+        const timer_ns: u32 = defaults.FRAME_INTERVAL_NS;
         std.debug.print("timer interval: {}ns (fixed 15fps low-power)\n", .{timer_ns});
 
         const interval = linux.itimerspec{
@@ -207,12 +215,12 @@ pub const App = struct {
             _ = c.wl_display_dispatch_pending(self.display);
 
             // Timer tick -- attempt render on all surfaces.
-            // When all surfaces are backpressured (frame_callback != null),
-            // renderTick returns immediately for each surface, making this
-            // wakeup a cheap no-op (drain timerfd + iterate surfaces). A
-            // future optimization could disarm the timerfd while all surfaces
-            // are backpressured and re-arm on the next frame callback, but
-            // the overhead is negligible for the current surface count.
+            // At 15fps, wakeups during backpressure (all SHM buffers busy or
+            // frame callback pending) are cheap no-ops: drain timerfd + iterate
+            // surfaces. The missed frame is acceptable at this power target and
+            // the next tick recovers. A future optimization could disarm the
+            // timerfd while all surfaces are backpressured and re-arm on the
+            // next frame callback, but the overhead is negligible.
             if (fds[1].revents & linux.POLL.IN != 0) {
                 // Drain the timerfd (8-byte expiration count)
                 var buf: [8]u8 = undefined;
