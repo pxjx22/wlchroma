@@ -1,4 +1,4 @@
-# ly-colormix-wallpaper
+# wlchroma
 
 An animated Wayland wallpaper using a GPU-rendered colormix shader.
 
@@ -19,4 +19,4 @@ An animated Wayland wallpaper using a GPU-rendered colormix shader.
     zig build
 
 ## Run
-    ./zig-out/bin/ly-colormix-wallpaper
+    ./zig-out/bin/wlchroma

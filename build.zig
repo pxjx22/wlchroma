@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     mod.linkSystemLibrary("wayland-egl", .{});
 
     const exe = b.addExecutable(.{
-        .name = "ly-colormix-wallpaper",
+        .name = "wlchroma",
         .root_module = mod,
     });
 

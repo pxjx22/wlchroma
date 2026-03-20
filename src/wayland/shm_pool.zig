@@ -59,7 +59,7 @@ pub const ShmPool = struct {
         _ = height;
         _ = stride;
 
-        const fd = try posix.memfd_create("ly-colormix-shm", 1);
+        const fd = try posix.memfd_create("wlchroma-shm", 1);
         errdefer posix.close(fd);
 
         try posix.ftruncate(fd, @intCast(total_size));
