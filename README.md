@@ -1,25 +1,22 @@
 # ly-colormix-wallpaper
 
-A small Zig Wayland layer-shell wallpaper daemon.
+An animated Wayland wallpaper using a GPU-rendered colormix shader.
 
-The current MVP creates one background surface per output, allocates shared-memory buffers, paints a single solid color, and commits that buffer as a wallpaper layer.
+## Features
+- EGL + OpenGL ES 2.0 renderer
+- Colormix animated shader (per-pixel UV-warp with palette lookup)
+- Fixed 15fps low-power mode (intentionally choppy/ASCII aesthetic)
+- Multi-monitor support via wlr-layer-shell
+- CPU/SHM fallback if EGL is unavailable
+
+## Requirements
+- Zig 0.14 (or master, see build.zig for exact version)
+- A Wayland compositor with wlr-layer-shell support (sway, river, Hyprland, etc.)
+- EGL and OpenGL ES 2.0 (Mesa/libGL on most Linux systems)
+- wayland-egl, wayland-client, wayland-scanner
 
 ## Build
-
-```bash
-zig build
-```
+    zig build
 
 ## Run
-
-```bash
-zig build run
-```
-
-## MVP Scope
-
-- connect to the Wayland display
-- discover outputs and required globals
-- create a background layer-shell surface for each output
-- allocate shm buffers and paint a solid color
-- commit the wallpaper and stay in the event loop
+    ./zig-out/bin/ly-colormix-wallpaper

@@ -230,6 +230,20 @@ pub const App = struct {
                 for (self.surfaces.items) |*s| {
                     s.renderTick(sh_ptr);
                 }
+
+                // If all surfaces are dead (e.g. all outputs unplugged),
+                // exit gracefully instead of spinning.
+                var any_alive = false;
+                for (self.surfaces.items) |*s| {
+                    if (!s.dead) {
+                        any_alive = true;
+                        break;
+                    }
+                }
+                if (!any_alive) {
+                    std.debug.print("all surfaces dead, exiting\n", .{});
+                    self.running = false;
+                }
             }
         }
     }
@@ -239,6 +253,7 @@ pub const App = struct {
         if (self.egl_ctx) |*ctx| {
             var made_current = false;
             for (self.surfaces.items) |*s| {
+                if (s.dead) continue;
                 if (s.egl_surface) |*egl_surf| {
                     made_current = egl_surf.makeCurrent(ctx);
                     if (!made_current) {

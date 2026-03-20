@@ -175,23 +175,23 @@ pub const ShaderProgram = struct {
 
     /// Upload invariant uniforms that only change on configure/resize.
     /// Call once after bind() and again on each resize.
+    /// Resolution is NOT set here -- it is per-surface and uploaded every
+    /// frame in setUniforms() to support multi-output with different sizes.
     pub fn setStaticUniforms(
         self: *const ShaderProgram,
-        resolution_w: f32,
-        resolution_h: f32,
         cos_mod: f32,
         sin_mod: f32,
     ) void {
-        c.glUniform2f(self.u_resolution_loc, resolution_w, resolution_h);
         c.glUniform1f(self.u_cos_mod_loc, cos_mod);
         c.glUniform1f(self.u_sin_mod_loc, sin_mod);
     }
 
     /// Upload per-frame uniforms for the colormix shader.
-    /// Only u_time changes every frame; resolution, cos_mod, sin_mod are
-    /// uploaded once via setStaticUniforms().
-    pub fn setUniforms(self: *const ShaderProgram, time: f32) void {
+    /// u_time and u_resolution change every frame (resolution is per-surface
+    /// in multi-output setups, so it must be set before each draw call).
+    pub fn setUniforms(self: *const ShaderProgram, time: f32, resolution_w: f32, resolution_h: f32) void {
         c.glUniform1f(self.u_time_loc, time);
+        c.glUniform2f(self.u_resolution_loc, resolution_w, resolution_h);
     }
 
     /// Draw the fullscreen quad. Assumes bind() was called once and

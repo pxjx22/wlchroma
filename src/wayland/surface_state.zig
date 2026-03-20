@@ -48,6 +48,10 @@ pub const SurfaceState = struct {
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
+    /// Set true when the layer surface is closed by the compositor (e.g.
+    /// output unplug). Resources are torn down in layerSurfaceClosed;
+    /// renderTick and deinit skip work when this is true.
+    dead: bool,
 
     const layer_surface_listener = c.zwlr_layer_surface_v1_listener{
         .configure = layerSurfaceConfigure,
@@ -97,6 +101,7 @@ pub const SurfaceState = struct {
             .palette_data = renderer.palette_data,
             .needs_static_uniforms = true,
             .buf_ctx = undefined, // initialized after shm_pool is stable
+            .dead = false,
         };
     }
 
@@ -118,6 +123,7 @@ pub const SurfaceState = struct {
     /// Render one frame. The shader pointer is passed per-call to avoid
     /// storing a borrowed pointer on the struct.
     pub fn renderTick(self: *SurfaceState, shader: ?*const ShaderProgram) void {
+        if (self.dead) return;
         if (!self.configured) return;
 
         // Compositor backpressure: if a frame callback is still pending,
@@ -140,15 +146,13 @@ pub const SurfaceState = struct {
             if (shader) |sh| {
                 if (self.needs_static_uniforms) {
                     sh.setStaticUniforms(
-                        @floatFromInt(self.pixel_w),
-                        @floatFromInt(self.pixel_h),
                         self.renderer.pattern_cos_mod,
                         self.renderer.pattern_sin_mod,
                     );
                     self.needs_static_uniforms = false;
                 }
                 const time = @as(f32, @floatFromInt(self.renderer.frames)) * defaults.TIME_SCALE;
-                sh.setUniforms(time);
+                sh.setUniforms(time, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
                 sh.draw();
             } else {
                 // Shader not ready yet, keep the black clear as fallback
@@ -232,6 +236,14 @@ pub const SurfaceState = struct {
 
     pub fn deinit(self: *SurfaceState, display: *c.wl_display) void {
         _ = display;
+        // If already torn down by layerSurfaceClosed, nothing left to do.
+        if (self.dead) return;
+        self.teardown();
+    }
+
+    /// Tear down all per-surface resources. Safe to call whether the
+    /// layer surface was closed by the compositor or by us.
+    fn teardown(self: *SurfaceState) void {
         if (self.frame_callback) |cb| {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
@@ -246,11 +258,10 @@ pub const SurfaceState = struct {
             if (self.layer_surface.wl_surface) |ws| {
                 c.wl_surface_attach(ws, null, 0, 0);
                 c.wl_surface_commit(ws);
-                // No wl_display_roundtrip here -- it is re-entrant UB inside
-                // teardown. wl_buffer_destroy is safe per protocol even if the
-                // compositor still holds a reference; no drain needed.
             }
         }
+        // LayerSurface.destroy() already null-checks both pointers,
+        // so this is safe even if the compositor already closed the surface.
         self.layer_surface.destroy();
         if (self.shm_pool) |*pool| {
             pool.deinit();
@@ -260,6 +271,7 @@ pub const SurfaceState = struct {
             self.allocator.free(self.cell_grid);
             self.cell_grid = &.{};
         }
+        self.configured = false;
     }
 };
 
@@ -456,18 +468,18 @@ fn frameCallbackDone(
     }
 }
 
-/// Layer surface closed by the compositor. This sets the shared App.running
-/// flag to false, which terminates the entire application. This is intentional:
-/// any output closing triggers a full shutdown. Per-output lifecycle tracking
-/// (allowing other outputs to continue) is out of scope for now.
+/// Layer surface closed by the compositor (e.g. output unplugged).
+/// Performs per-surface teardown and marks the surface as dead.
+/// The main loop checks if all surfaces are dead and exits gracefully.
 fn layerSurfaceClosed(
     data: ?*anyopaque,
     layer_surface: ?*c.zwlr_layer_surface_v1,
 ) callconv(.c) void {
     _ = layer_surface;
     const self: *SurfaceState = @ptrCast(@alignCast(data));
-    std.debug.print("layer surface closed, signaling shutdown\n", .{});
-    self.running.* = false;
+    std.debug.print("layer surface closed, tearing down surface\n", .{});
+    self.teardown();
+    self.dead = true;
 }
 
 /// wl_buffer.release handler. Clears the busy flag in ShmPool so

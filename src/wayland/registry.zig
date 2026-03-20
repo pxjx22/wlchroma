@@ -48,7 +48,6 @@ fn registryGlobal(
     interface: [*c]const u8,
     version: u32,
 ) callconv(.c) void {
-    _ = version;
     const self: *Registry = @ptrCast(@alignCast(data));
     const iface = std.mem.sliceTo(interface, 0);
 
@@ -61,7 +60,10 @@ fn registryGlobal(
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.zwlr_layer_shell_v1_interface.name, 0))) {
         self.layer_shell = @ptrCast(c.wl_registry_bind(registry, name, &c.zwlr_layer_shell_v1_interface, 4));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_output_interface.name, 0))) {
-        const wl_out: ?*c.wl_output = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_output_interface, 4));
+        // Bind at most version 3: gives done + mode + geometry events.
+        // Version 4 adds name/description which are nice-to-have but many
+        // compositors (especially older wlroots-based ones) only support v2/v3.
+        const wl_out: ?*c.wl_output = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_output_interface, @min(version, 3)));
         if (wl_out == null) return;
 
         const outputs = self.outputs orelse return;
