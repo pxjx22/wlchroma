@@ -36,10 +36,6 @@ pub const ColormixRenderer = struct {
         }
     }
 
-    pub fn advanceFrame(self: *ColormixRenderer) void {
-        self.frames += 1;
-    }
-
     pub fn renderGrid(self: *const ColormixRenderer, grid_w: usize, grid_h: usize, out: []Rgb) void {
         const time = @as(f32, @floatFromInt(self.frames)) * defaults.TIME_SCALE;
 
