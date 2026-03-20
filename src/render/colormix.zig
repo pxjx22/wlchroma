@@ -1,6 +1,7 @@
 const std = @import("std");
 const defaults = @import("../config/defaults.zig");
 const palette_mod = @import("palette.zig");
+const ShaderProgram = @import("shader.zig").ShaderProgram;
 
 pub const Rgb = defaults.Rgb;
 const Cell = defaults.Cell;
@@ -12,16 +13,21 @@ pub const ColormixRenderer = struct {
     pattern_sin_mod: f32,
     palette: [12]Cell,
     last_advance_ms: u32,
+    /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
+    /// Computed once at init from the palette; shared across all outputs.
+    palette_data: [36]f32,
 
     pub fn init(col1: Rgb, col2: Rgb, col3: Rgb) ColormixRenderer {
         var prng = std.Random.DefaultPrng.init(defaults.SEED);
         const random = prng.random();
+        const pal = palette_mod.buildPalette(col1, col2, col3);
         return .{
             .frames = 0,
             .pattern_cos_mod = random.float(f32) * std.math.pi * 2.0,
             .pattern_sin_mod = random.float(f32) * std.math.pi * 2.0,
-            .palette = palette_mod.buildPalette(col1, col2, col3),
+            .palette = pal,
             .last_advance_ms = 0,
+            .palette_data = ShaderProgram.buildPaletteData(&pal),
         };
     }
 
@@ -51,6 +57,9 @@ pub const ColormixRenderer = struct {
                 var uv2x = uvx + uvy;
                 var uv2y = uvx + uvy;
 
+                // NOTE: Inner loop iteration order (len -> uv2 update ->
+                // uvx/uvy update -> warp) is intentional and must stay
+                // matched with the GPU path in shader.zig frag_src.
                 for (0..3) |_| {
                     const len = vecLength(uvx, uvy);
                     uv2x += uvx + len;

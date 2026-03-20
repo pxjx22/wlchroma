@@ -11,8 +11,9 @@ pub const ShmPool = struct {
     fd: posix.fd_t,
 
     pub fn init(shm: *c.wl_shm, width: u32, height: u32) !ShmPool {
-        const stride = width * 4; // XRGB8888
-        const buf_size: usize = @as(usize, stride) * @as(usize, height);
+        // Use usize for stride to prevent u32 overflow on extreme resolutions.
+        const stride: usize = @as(usize, width) * 4; // XRGB8888
+        const buf_size: usize = stride * @as(usize, height);
         const total_size = buf_size * 2;
 
         // memfd_create with MFD_CLOEXEC = 1

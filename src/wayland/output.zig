@@ -6,6 +6,9 @@ pub const OutputInfo = struct {
     name: []const u8,
     width: i32,
     height: i32,
+    /// Output refresh rate in mHz (Hz * 1000), e.g. 60000 = 60Hz.
+    /// Stored from the wl_output.mode event for future timer tuning.
+    refresh_mhz: i32,
     done: bool,
     allocator: std.mem.Allocator,
 
@@ -55,7 +58,6 @@ fn outputMode(
     height: i32,
     refresh: i32,
 ) callconv(.c) void {
-    _ = refresh;
     _ = wl_output;
     // Only record dimensions for the current mode; compositors may
     // advertise multiple modes, but only the current one is active.
@@ -63,6 +65,7 @@ fn outputMode(
     const self: *OutputInfo = @ptrCast(@alignCast(data));
     self.width = width;
     self.height = height;
+    self.refresh_mhz = refresh;
 }
 
 fn outputDone(

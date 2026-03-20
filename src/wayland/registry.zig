@@ -68,6 +68,7 @@ fn registryGlobal(
             .name = "",
             .width = 0,
             .height = 0,
+            .refresh_mhz = 0,
             .done = false,
             .allocator = self.allocator,
         };
@@ -87,5 +88,8 @@ fn registryGlobalRemove(
 ) callconv(.c) void {
     _ = data;
     _ = registry;
-    _ = name;
+    // Hot-unplug handling is deferred -- it would require removing the
+    // output's SurfaceState and restructuring the main loop. Log the
+    // event so it is at least visible during development.
+    std.debug.print("registry: global {} removed (hot-unplug handling deferred)\n", .{name});
 }

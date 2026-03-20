@@ -69,7 +69,7 @@ pub const App = struct {
 
         for (app.outputs.items) |*out| {
             if (out.done) {
-                std.debug.print("output: {s} {}x{}\n", .{ out.name, out.width, out.height });
+                std.debug.print("output: {s} {}x{} refresh={}mHz\n", .{ out.name, out.width, out.height, out.refresh_mhz });
             }
         }
 
@@ -119,7 +119,7 @@ pub const App = struct {
                         // Bind invariant GL state once -- program, VBO, vertex
                         // layout. Persists across frames for this single-program
                         // setup. draw() only uploads per-frame uniforms.
-                        if (self.shader) |*sh| sh.bind();
+                        if (self.shader) |*sh| sh.bind(&self.renderer.palette_data);
                     }
                     break;
                 }
@@ -129,6 +129,11 @@ pub const App = struct {
         // --- poll+timerfd main loop ---
         // Create a timerfd that fires every 33ms (~30fps) using CLOCK_MONOTONIC.
         // This replaces vblank-rate wakeups with render-rate wakeups.
+        //
+        // NOTE: 33ms is a known simplification. The actual output refresh rate
+        // (stored in OutputInfo.refresh_mhz) may differ. Plumbing per-output
+        // refresh into per-output timers would require restructuring the main
+        // loop -- deferred for now. The refresh rate is logged at startup above.
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
@@ -173,6 +178,20 @@ pub const App = struct {
                 std.debug.print("poll error: {}\n", .{err});
                 break;
             };
+
+            // Check for Wayland socket hangup/error (compositor disconnect)
+            if (fds[0].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+                c.wl_display_cancel_read(self.display);
+                std.debug.print("Wayland socket HUP/ERR, compositor disconnected\n", .{});
+                break;
+            }
+
+            // Check for timerfd hangup/error
+            if (fds[1].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+                c.wl_display_cancel_read(self.display);
+                std.debug.print("timerfd HUP/ERR, exiting\n", .{});
+                break;
+            }
 
             // Read Wayland events if the socket is readable
             if (fds[0].revents & linux.POLL.IN != 0) {

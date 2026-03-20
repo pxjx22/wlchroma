@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("../wl.zig").c;
 const defaults = @import("../config/defaults.zig");
 const palette_mod = @import("palette.zig");
@@ -12,6 +13,9 @@ pub const ShaderProgram = struct {
     u_cos_mod_loc: c.GLint,
     u_sin_mod_loc: c.GLint,
     u_palette_loc: c.GLint,
+    /// Debug-only flag: set to true after bind() is called. draw() asserts
+    /// this in debug builds to catch missing bind() calls.
+    bound: bool,
 
     // Vertex shader: pass-through, position from attribute
     const vert_src: [*:0]const u8 =
@@ -34,11 +38,17 @@ pub const ShaderProgram = struct {
         \\uniform vec3  u_palette[12];
         \\void main() {
         \\    float px = gl_FragCoord.x - 0.5;
-        \\    float py = gl_FragCoord.y - 0.5;
+        \\    // Flip Y: GLES gl_FragCoord.y=0 is bottom, Wayland/SHM expects
+        \\    // top-left origin. The CPU path uses (yi*2 - hi) where increasing
+        \\    // y goes downward; this flip matches that convention.
+        \\    float py = u_resolution.y - gl_FragCoord.y - 0.5;
         \\    float uvx = (px * 2.0 - u_resolution.x) / (u_resolution.y * 2.0);
         \\    float uvy = (py * 2.0 - u_resolution.y) / u_resolution.y;
         \\    float uv2x = uvx + uvy;
         \\    float uv2y = uvx + uvy;
+        \\    // NOTE: Inner loop iteration order (len -> uv2 update -> uvx/uvy
+        \\    // update -> warp) is intentional and must stay matched with the
+        \\    // CPU path in colormix.zig renderGrid.
         \\    for (int i = 0; i < 3; i++) {
         \\        float len = sqrt(uvx * uvx + uvy * uvy);
         \\        uv2x += uvx + len;
@@ -78,6 +88,11 @@ pub const ShaderProgram = struct {
             std.debug.print("program link error: {s}\n", .{@as([*:0]const u8, @ptrCast(&buf))});
             return error.GlLinkFailed;
         }
+
+        // Detach shaders after successful link so the shader objects can be
+        // freed immediately when glDeleteShader is called (via defer above).
+        c.glDetachShader(program, vert);
+        c.glDetachShader(program, frag);
 
         const a_pos_raw = c.glGetAttribLocation(program, "a_pos");
         if (a_pos_raw < 0) return error.GlAttribNotFound;
@@ -122,14 +137,16 @@ pub const ShaderProgram = struct {
             .u_cos_mod_loc = u_cos_mod_loc,
             .u_sin_mod_loc = u_sin_mod_loc,
             .u_palette_loc = u_palette_loc,
+            .bound = false,
         };
     }
 
-    /// Bind invariant GL state: program, VBO, and vertex attribute layout.
-    /// Call once after the EGL context is made current (or after a program
-    /// switch). This is a single-program single-VBO setup, so the bound
-    /// state persists across frames until the context is destroyed.
-    pub fn bind(self: *const ShaderProgram) void {
+    /// Bind invariant GL state: program, VBO, vertex attribute layout, and
+    /// the static palette uniform. Call once after the EGL context is made
+    /// current (or after a program switch). This is a single-program
+    /// single-VBO setup, so the bound state persists across frames until the
+    /// context is destroyed.
+    pub fn bind(self: *ShaderProgram, palette_data: *const [36]f32) void {
         c.glUseProgram(self.program);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
@@ -141,9 +158,15 @@ pub const ShaderProgram = struct {
             0, // stride = 0 (tightly packed)
             @as(?*const anyopaque, null), // offset into VBO
         );
+        // Upload static palette once at bind time. The palette is constant
+        // after ColormixRenderer.init(), so there is no need to re-upload
+        // every frame in setUniforms.
+        c.glUniform3fv(self.u_palette_loc, 12, @as([*c]const c.GLfloat, @ptrCast(palette_data)));
+        self.bound = true;
     }
 
     /// Upload per-frame uniforms for the colormix shader.
+    /// The palette uniform is static and uploaded once in bind().
     pub fn setUniforms(
         self: *const ShaderProgram,
         time: f32,
@@ -151,19 +174,17 @@ pub const ShaderProgram = struct {
         resolution_h: f32,
         cos_mod: f32,
         sin_mod: f32,
-        palette_data: *const [36]f32,
     ) void {
         c.glUniform1f(self.u_time_loc, time);
         c.glUniform2f(self.u_resolution_loc, resolution_w, resolution_h);
         c.glUniform1f(self.u_cos_mod_loc, cos_mod);
         c.glUniform1f(self.u_sin_mod_loc, sin_mod);
-        c.glUniform3fv(self.u_palette_loc, 12, @as([*c]const c.GLfloat, @ptrCast(palette_data)));
     }
 
     /// Draw the fullscreen quad. Assumes bind() was called once and
     /// setUniforms() was called for this frame.
     pub fn draw(self: *const ShaderProgram) void {
-        _ = self;
+        if (builtin.mode == .Debug) std.debug.assert(self.bound);
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
     }
 

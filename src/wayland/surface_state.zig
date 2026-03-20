@@ -36,6 +36,10 @@ pub const SurfaceState = struct {
     egl_surface: ?EglSurface,
     egl_ctx: ?*const EglContext,
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
+    /// Copied from ColormixRenderer.palette_data at create() time. The palette
+    /// is constant after ColormixRenderer.init() -- it never changes at runtime.
+    /// If palette hot-reload were added, this would need to be refreshed in
+    /// renderTick and re-uploaded to the shader via bind().
     palette_data: [36]f32,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
@@ -86,7 +90,7 @@ pub const SurfaceState = struct {
             .running = running,
             .egl_surface = null,
             .egl_ctx = egl_ctx,
-            .palette_data = ShaderProgram.buildPaletteData(&renderer.palette),
+            .palette_data = renderer.palette_data,
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -137,7 +141,6 @@ pub const SurfaceState = struct {
                     @floatFromInt(self.pixel_h),
                     self.renderer.pattern_cos_mod,
                     self.renderer.pattern_sin_mod,
-                    &self.palette_data,
                 );
                 sh.draw();
             } else {
@@ -155,6 +158,13 @@ pub const SurfaceState = struct {
 
             if (!egl_surf.swapBuffers()) {
                 std.debug.print("eglSwapBuffers failed\n", .{});
+                // Swap failed -- the frame callback will never fire because
+                // the commit never reached the compositor. Destroy it to
+                // prevent stalling this surface permanently.
+                if (self.frame_callback) |stale_cb| {
+                    c.wl_callback_destroy(stale_cb);
+                    self.frame_callback = null;
+                }
             }
             return;
         }
@@ -188,12 +198,17 @@ pub const SurfaceState = struct {
     /// Read CLOCK_MONOTONIC and return milliseconds (wrapping u32).
     fn getMonotonicMs() u32 {
         var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        const rc = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        if (rc != 0) {
+            std.debug.print("clock_gettime failed: rc={}\n", .{rc});
+            return 0;
+        }
         const ms: u64 = @intCast(ts.sec * 1000 + @divFloor(ts.nsec, 1_000_000));
         return @truncate(ms);
     }
 
     pub fn deinit(self: *SurfaceState, display: *c.wl_display) void {
+        _ = display;
         if (self.frame_callback) |cb| {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
@@ -208,8 +223,9 @@ pub const SurfaceState = struct {
             if (self.layer_surface.wl_surface) |ws| {
                 c.wl_surface_attach(ws, null, 0, 0);
                 c.wl_surface_commit(ws);
-                // Drain pending release events before destroying buffers
-                _ = c.wl_display_roundtrip(display);
+                // No wl_display_roundtrip here -- it is re-entrant UB inside
+                // teardown. wl_buffer_destroy is safe per protocol even if the
+                // compositor still holds a reference; no drain needed.
             }
         }
         self.layer_surface.destroy();
@@ -262,6 +278,8 @@ fn layerSurfaceConfigure(
             // Update viewport to match new dimensions. Context must be current.
             if (existing.makeCurrent(ctx)) {
                 c.glViewport(0, 0, @intCast(pw), @intCast(ph));
+            } else {
+                std.debug.print("configure: makeCurrent failed during resize, viewport not updated\n", .{});
             }
         } else {
             // First configure: create the EGL surface
@@ -271,7 +289,9 @@ fn layerSurfaceConfigure(
             };
             if (self.egl_surface) |*egl_surf| {
                 if (egl_surf.makeCurrent(ctx)) {
-                    _ = c.eglSwapInterval(ctx.display, 0);
+                    if (c.eglSwapInterval(ctx.display, 0) == c.EGL_FALSE) {
+                        std.debug.print("eglSwapInterval(0) failed -- vsync may remain enabled\n", .{});
+                    }
                     // Set viewport once at creation; updated on resize above.
                     c.glViewport(0, 0, @intCast(pw), @intCast(ph));
                 }
@@ -388,11 +408,17 @@ fn frameCallbackDone(
     callback: ?*c.wl_callback,
     time_ms: u32,
 ) callconv(.c) void {
-    _ = time_ms;
     const self: *SurfaceState = @ptrCast(@alignCast(data));
 
     c.wl_callback_destroy(callback);
     self.frame_callback = null;
+
+    // On the EGL path, use the compositor's presentation timestamp to
+    // drive frame advancement. This gives presentation-aligned animation
+    // rather than relying solely on the timerfd tick.
+    if (self.egl_surface != null) {
+        self.renderer.maybeAdvance(time_ms);
+    }
 }
 
 /// Layer surface closed by the compositor. This sets the shared App.running
