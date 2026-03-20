@@ -127,25 +127,14 @@ pub const App = struct {
         }
 
         // --- poll+timerfd main loop ---
-        // Create a timerfd that fires at the render rate using CLOCK_MONOTONIC.
-        // Derive interval from the fastest output's refresh rate so we can
-        // produce frames at the display's native cadence. Falls back to ~30fps
-        // (33ms) if no output reports a refresh rate.
+        // Create a timerfd that fires at a fixed 15fps (~66.7ms) cadence.
+        // This is an intentionally low-power, choppy/ASCII-vibe wallpaper;
+        // the interval is independent of the output refresh rate.
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
-        // Find max refresh_mhz across all outputs to determine timer cadence.
-        var max_refresh_mhz: i32 = 0;
-        for (self.outputs.items) |*out| {
-            if (out.done and out.refresh_mhz > max_refresh_mhz) {
-                max_refresh_mhz = out.refresh_mhz;
-            }
-        }
-        const timer_ns: u32 = if (max_refresh_mhz > 0)
-            @intCast(@divFloor(@as(u64, 1_000_000_000_000), @as(u64, @intCast(max_refresh_mhz))))
-        else
-            33_333_333; // ~30fps fallback
-        std.debug.print("timer interval: {}ns (from max refresh {}mHz)\n", .{ timer_ns, max_refresh_mhz });
+        const timer_ns: u32 = 66_666_667; // 1_000_000_000 / 15 -- fixed 15fps
+        std.debug.print("timer interval: {}ns (fixed 15fps low-power)\n", .{timer_ns});
 
         const interval = linux.itimerspec{
             .it_value = .{ .sec = 0, .nsec = timer_ns },

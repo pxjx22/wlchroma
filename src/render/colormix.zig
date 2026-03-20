@@ -34,12 +34,13 @@ pub const ColormixRenderer = struct {
         };
     }
 
-    /// Advance the frame counter at most once per 33ms interval.
+    /// Advance the frame counter at most once per 66ms interval (~15fps).
+    /// Intentionally low-power, choppy/ASCII-vibe wallpaper cadence.
     /// Multiple outputs calling this with the same (or close) timestamp
     /// will only increment frames once, keeping all outputs in sync.
     pub fn maybeAdvance(self: *ColormixRenderer, time_ms: u32) void {
         const delta = time_ms -% self.last_advance_ms;
-        if (self.last_advance_ms == 0 or delta >= 33) {
+        if (self.last_advance_ms == 0 or delta >= 66) {
             self.frames += 1;
             self.last_advance_ms = time_ms;
         }
