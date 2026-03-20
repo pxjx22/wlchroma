@@ -1,11 +1,17 @@
 const std = @import("std");
 const c = @import("../wl.zig").c;
+const defaults = @import("../config/defaults.zig");
+const palette_mod = @import("palette.zig");
 
 pub const ShaderProgram = struct {
     program: c.GLuint,
     vbo: c.GLuint,
     a_pos_loc: c.GLuint,
-    u_color_loc: c.GLint,
+    u_time_loc: c.GLint,
+    u_resolution_loc: c.GLint,
+    u_cos_mod_loc: c.GLint,
+    u_sin_mod_loc: c.GLint,
+    u_palette_loc: c.GLint,
 
     // Vertex shader: pass-through, position from attribute
     const vert_src: [*:0]const u8 =
@@ -16,13 +22,36 @@ pub const ShaderProgram = struct {
         \\}
     ;
 
-    // Fragment shader: output a single solid color uniform
+    // Fragment shader: colormix warp + palette lookup
+    // Exact port of ColormixRenderer.renderGrid from colormix.zig
     const frag_src: [*:0]const u8 =
         \\#version 100
-        \\precision mediump float;
-        \\uniform vec3 u_color;
+        \\precision highp float;
+        \\uniform float u_time;
+        \\uniform vec2  u_resolution;
+        \\uniform float u_cos_mod;
+        \\uniform float u_sin_mod;
+        \\uniform vec3  u_palette[12];
         \\void main() {
-        \\    gl_FragColor = vec4(u_color, 1.0);
+        \\    float px = gl_FragCoord.x - 0.5;
+        \\    float py = gl_FragCoord.y - 0.5;
+        \\    float uvx = (px * 2.0 - u_resolution.x) / (u_resolution.y * 2.0);
+        \\    float uvy = (py * 2.0 - u_resolution.y) / u_resolution.y;
+        \\    float uv2x = uvx + uvy;
+        \\    float uv2y = uvx + uvy;
+        \\    for (int i = 0; i < 3; i++) {
+        \\        float len = sqrt(uvx * uvx + uvy * uvy);
+        \\        uv2x += uvx + len;
+        \\        uv2y += uvy + len;
+        \\        uvx += 0.5 * cos(u_cos_mod + uv2y * 0.2 + u_time * 0.1);
+        \\        uvy += 0.5 * sin(u_sin_mod + uv2x - u_time * 0.1);
+        \\        float warp = 1.0 * cos(uvx + uvy) - sin(uvx * 0.7 - uvy);
+        \\        uvx -= warp;
+        \\        uvy -= warp;
+        \\    }
+        \\    float len = sqrt(uvx * uvx + uvy * uvy);
+        \\    int idx = int(mod(floor(len * 5.0), 12.0));
+        \\    gl_FragColor = vec4(u_palette[idx], 1.0);
         \\}
     ;
 
@@ -54,8 +83,16 @@ pub const ShaderProgram = struct {
         if (a_pos_raw < 0) return error.GlAttribNotFound;
         const a_pos_loc: c.GLuint = @intCast(a_pos_raw);
 
-        const u_color_loc = c.glGetUniformLocation(program, "u_color");
-        if (u_color_loc < 0) return error.GlUniformNotFound;
+        const u_time_loc = c.glGetUniformLocation(program, "u_time");
+        if (u_time_loc < 0) return error.GlUniformNotFound;
+        const u_resolution_loc = c.glGetUniformLocation(program, "u_resolution");
+        if (u_resolution_loc < 0) return error.GlUniformNotFound;
+        const u_cos_mod_loc = c.glGetUniformLocation(program, "u_cos_mod");
+        if (u_cos_mod_loc < 0) return error.GlUniformNotFound;
+        const u_sin_mod_loc = c.glGetUniformLocation(program, "u_sin_mod");
+        if (u_sin_mod_loc < 0) return error.GlUniformNotFound;
+        const u_palette_loc = c.glGetUniformLocation(program, "u_palette[0]");
+        if (u_palette_loc < 0) return error.GlUniformNotFound;
 
         // Upload the fullscreen quad once into a VBO.
         // Four vertices as a triangle strip covering NDC [-1, 1].
@@ -80,7 +117,11 @@ pub const ShaderProgram = struct {
             .program = program,
             .vbo = vbo,
             .a_pos_loc = a_pos_loc,
-            .u_color_loc = u_color_loc,
+            .u_time_loc = u_time_loc,
+            .u_resolution_loc = u_resolution_loc,
+            .u_cos_mod_loc = u_cos_mod_loc,
+            .u_sin_mod_loc = u_sin_mod_loc,
+            .u_palette_loc = u_palette_loc,
         };
     }
 
@@ -102,16 +143,47 @@ pub const ShaderProgram = struct {
         );
     }
 
-    /// Draw the fullscreen quad. Only uploads the per-frame uniform and
-    /// issues the draw call. Assumes bind() was called once beforehand.
-    pub fn draw(self: *const ShaderProgram, r: f32, g: f32, b: f32) void {
-        c.glUniform3f(self.u_color_loc, r, g, b);
+    /// Upload per-frame uniforms for the colormix shader.
+    pub fn setUniforms(
+        self: *const ShaderProgram,
+        time: f32,
+        resolution_w: f32,
+        resolution_h: f32,
+        cos_mod: f32,
+        sin_mod: f32,
+        palette_data: *const [36]f32,
+    ) void {
+        c.glUniform1f(self.u_time_loc, time);
+        c.glUniform2f(self.u_resolution_loc, resolution_w, resolution_h);
+        c.glUniform1f(self.u_cos_mod_loc, cos_mod);
+        c.glUniform1f(self.u_sin_mod_loc, sin_mod);
+        c.glUniform3fv(self.u_palette_loc, 12, @as([*c]const c.GLfloat, @ptrCast(palette_data)));
+    }
+
+    /// Draw the fullscreen quad. Assumes bind() was called once and
+    /// setUniforms() was called for this frame.
+    pub fn draw(self: *const ShaderProgram) void {
+        _ = self;
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
     }
 
     pub fn deinit(self: *ShaderProgram) void {
         c.glDeleteBuffers(1, &self.vbo);
         c.glDeleteProgram(self.program);
+    }
+
+    /// Pre-compute blended palette colors as a flat array of 36 f32 values
+    /// (12 vec3s, normalized to [0.0, 1.0]). Uses palette_mod.blend to match
+    /// the CPU path exactly.
+    pub fn buildPaletteData(palette: *const [12]defaults.Cell) [36]f32 {
+        var data: [36]f32 = undefined;
+        for (palette, 0..) |cell, i| {
+            const rgb = palette_mod.blend(cell.fg, cell.bg, cell.alpha);
+            data[i * 3 + 0] = @as(f32, @floatFromInt(rgb.r)) / 255.0;
+            data[i * 3 + 1] = @as(f32, @floatFromInt(rgb.g)) / 255.0;
+            data[i * 3 + 2] = @as(f32, @floatFromInt(rgb.b)) / 255.0;
+        }
+        return data;
     }
 };
 

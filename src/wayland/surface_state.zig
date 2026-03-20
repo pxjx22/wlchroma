@@ -35,6 +35,8 @@ pub const SurfaceState = struct {
     running: *bool,
     egl_surface: ?EglSurface,
     egl_ctx: ?*const EglContext,
+    /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
+    palette_data: [36]f32,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -84,6 +86,7 @@ pub const SurfaceState = struct {
             .running = running,
             .egl_surface = null,
             .egl_ctx = egl_ctx,
+            .palette_data = ShaderProgram.buildPaletteData(&renderer.palette),
             .buf_ctx = undefined, // initialized after shm_pool is stable
         };
     }
@@ -120,17 +123,23 @@ pub const SurfaceState = struct {
             const ctx = self.egl_ctx.?;
             if (!egl_surf.makeCurrent(ctx)) return;
 
-            // Advance shared renderer state every frame so that Phase 4
-            // can read renderer.frames / last_advance_ms as animation time
-            // without a stale-state jump on first use.
-            // TODO(Phase 4): use frame callback timestamp for VRR-aligned animation
-            // instead of a fresh clock_gettime.
+            // Advance shared renderer state every frame so the frame counter
+            // drives animation time, matching the CPU path exactly.
             const now_ms = getMonotonicMs();
             self.renderer.maybeAdvance(now_ms);
 
             if (shader) |sh| {
                 // glViewport is set once at configure / resize, not per-frame.
-                sh.draw(0.2, 0.4, 0.8); // solid blue -- visible proof shader pipeline works
+                const time = @as(f32, @floatFromInt(self.renderer.frames)) * defaults.TIME_SCALE;
+                sh.setUniforms(
+                    time,
+                    @floatFromInt(self.pixel_w),
+                    @floatFromInt(self.pixel_h),
+                    self.renderer.pattern_cos_mod,
+                    self.renderer.pattern_sin_mod,
+                    &self.palette_data,
+                );
+                sh.draw();
             } else {
                 // Shader not ready yet, keep the black clear as fallback
                 c.glClearColor(0.0, 0.0, 0.0, 1.0);
