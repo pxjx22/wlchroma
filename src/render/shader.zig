@@ -351,7 +351,7 @@ pub const BlitShader = struct {
 
         c.glActiveTexture(c.GL_TEXTURE0);
         c.glBindTexture(c.GL_TEXTURE_2D, tex);
-        c.glUniform1i(self.u_tex_loc, 0);
+        // u_tex uniform is set once in bind(); no need to re-upload per draw.
 
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
 

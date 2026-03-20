@@ -151,14 +151,30 @@ pub const App = struct {
                     if (self.shader) |*sh| sh.bind(&self.renderer.palette_data);
 
                     // Initialize blit shader for offscreen upscale pass.
-                    // Only needed when renderer_scale < 1.0, but init is cheap
-                    // and keeps the code unconditional.
+                    // Only needed when renderer_scale < 1.0.
+                    //
+                    // INVARIANT: The blit shader is initialized once here and
+                    // never recreated. Runtime scale changes are not supported.
+                    // If the blit shader fails to init, all per-surface offscreen
+                    // FBOs are destroyed so renderTick uses the direct path.
                     if (self.renderer_scale < 1.0) {
                         self.blit_shader = BlitShader.init() catch |err| blk: {
                             std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
                             break :blk null;
                         };
-                        if (self.blit_shader) |*bs| bs.bind();
+                        if (self.blit_shader) |*bs| {
+                            bs.bind();
+                        } else {
+                            // Blit shader unavailable: tear down all offscreen FBOs
+                            // so surfaces do not render into an FBO that cannot be
+                            // presented. renderTick will use the direct path.
+                            for (self.surfaces.items) |*surf| {
+                                if (surf.offscreen) |*ofs| {
+                                    ofs.deinit();
+                                    surf.offscreen = null;
+                                }
+                            }
+                        }
                     }
 
                     shader_ready = true;

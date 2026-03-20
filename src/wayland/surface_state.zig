@@ -168,17 +168,22 @@ pub const SurfaceState = struct {
                 const time = @as(f32, @floatFromInt(self.renderer.frames)) * defaults.TIME_SCALE;
 
                 if (self.offscreen) |*ofs| {
-                    // Offscreen pass: render colormix at reduced resolution
-                    ofs.bind();
-                    c.glViewport(0, 0, @intCast(ofs.width), @intCast(ofs.height));
-                    sh.setUniforms(time, @floatFromInt(ofs.width), @floatFromInt(ofs.height));
-                    sh.draw();
-
-                    // Upscale pass: blit FBO texture to default framebuffer
-                    ofs.unbind();
-                    c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
                     if (blit_shader) |bs| {
+                        // Offscreen pass: render colormix at reduced resolution
+                        ofs.bind();
+                        c.glViewport(0, 0, @intCast(ofs.width), @intCast(ofs.height));
+                        sh.setUniforms(time, @floatFromInt(ofs.width), @floatFromInt(ofs.height));
+                        sh.draw();
+
+                        // Upscale pass: blit FBO texture to default framebuffer
+                        ofs.unbind();
+                        c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
                         bs.draw(ofs.tex, sh.program, sh.vbo, sh.a_pos_loc);
+                    } else {
+                        // Blit shader unavailable -- cannot present offscreen FBO.
+                        // Fall back to direct rendering at full resolution.
+                        sh.setUniforms(time, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
+                        sh.draw();
                     }
                 } else {
                     // Direct render at full resolution (scale == 1.0)
@@ -279,9 +284,22 @@ pub const SurfaceState = struct {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
         }
-        // Tear down offscreen FBO before EGL surface.
+        // GL object deletion requires a current context. Attempt to make
+        // this surface's context current before deleting the offscreen FBO.
+        // If makeCurrent fails, skip GL deletion -- a small leak at teardown
+        // is acceptable vs. undefined behavior from GL calls without context.
         if (self.offscreen) |*ofs| {
-            ofs.deinit();
+            var gl_ok = false;
+            if (self.egl_surface) |*egl_surf| {
+                if (self.egl_ctx) |ctx| {
+                    gl_ok = egl_surf.makeCurrent(ctx);
+                }
+            }
+            if (gl_ok) {
+                ofs.deinit();
+            } else {
+                std.debug.print("teardown: skipping GL cleanup (no current context), offscreen FBO leaked\n", .{});
+            }
             self.offscreen = null;
         }
         // Tear down EGL surface before the layer surface (wl_surface)
@@ -343,6 +361,9 @@ fn layerSurfaceConfigure(
             self.configured = false;
             return;
         };
+        // Track whether the EGL context is current after this configure.
+        // FBO creation/resize must not proceed without a current context.
+        var gl_context_current = false;
         if (self.egl_surface) |*existing| {
             // Resize the existing EGL window -- no need to recreate EGLSurface.
             // eglSwapInterval is context-local (EGL spec 3.7.3), not per-surface,
@@ -350,6 +371,7 @@ fn layerSurfaceConfigure(
             existing.resize(pw, ph);
             // Update viewport to match new dimensions. Context must be current.
             if (existing.makeCurrent(ctx)) {
+                gl_context_current = true;
                 c.glViewport(0, 0, @intCast(pw), @intCast(ph));
             } else {
                 std.debug.print("configure: makeCurrent failed during resize, viewport not updated\n", .{});
@@ -364,6 +386,7 @@ fn layerSurfaceConfigure(
             };
             if (self.egl_surface) |*egl_surf| {
                 if (egl_surf.makeCurrent(ctx)) {
+                    gl_context_current = true;
                     if (c.eglSwapInterval(ctx.display, 0) == c.EGL_FALSE) {
                         std.debug.print("eglSwapInterval(0) failed -- vsync may remain enabled\n", .{});
                     }
@@ -374,24 +397,33 @@ fn layerSurfaceConfigure(
         }
 
         // Create or resize offscreen FBO for reduced-resolution rendering.
-        if (self.egl_surface != null and self.renderer_scale < 1.0) {
+        // Only proceed if the GL context is current -- GL calls without a
+        // current context are undefined behavior.
+        if (self.egl_surface != null and self.renderer_scale < 1.0 and gl_context_current) {
             const rw = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(pw)) * self.renderer_scale)));
             const rh = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(ph)) * self.renderer_scale)));
             if (self.offscreen) |*ofs| {
-                ofs.resize(rw, rh);
+                if (!ofs.resize(rw, rh)) {
+                    std.debug.print("configure: FBO incomplete after resize, disabling offscreen\n", .{});
+                    ofs.deinit();
+                    self.offscreen = null;
+                }
             } else {
                 self.offscreen = Offscreen.init(rw, rh, self.upscale_filter) catch |err| blk: {
                     std.debug.print("Offscreen.init failed: {}, rendering at full resolution\n", .{err});
                     break :blk null;
                 };
             }
-        } else {
-            // scale == 1.0 or no EGL surface: no FBO needed
+        } else if (gl_context_current) {
+            // scale == 1.0 or no EGL surface: no FBO needed.
+            // Only tear down if context is current (GL deletion requires it).
             if (self.offscreen) |*ofs| {
                 ofs.deinit();
                 self.offscreen = null;
             }
         }
+        // If !gl_context_current and offscreen exists, leave it alone --
+        // it will be torn down when context becomes current or at deinit.
 
         // With EGL, render the first frame via GPU and skip the shm path
         if (self.egl_surface) |*egl_surf| {
