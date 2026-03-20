@@ -356,16 +356,25 @@ fn layerSurfaceConfigure(
                     self.frame_callback = null;
                 }
 
-                _ = egl_surf.swapBuffers();
+                if (!egl_surf.swapBuffers()) {
+                    std.debug.print("configure: initial eglSwapBuffers failed\n", .{});
+                    // Swap failed -- the frame callback will never fire.
+                    // Destroy it to prevent permanently stalling this surface.
+                    if (self.frame_callback) |stale_cb| {
+                        c.wl_callback_destroy(stale_cb);
+                        self.frame_callback = null;
+                    }
+                }
             }
             self.configured = true;
             std.debug.print("configure (EGL): {}x{}\n", .{ pw, ph });
             return;
         }
 
-        // EGL surface creation failed -- mark unconfigured so renderTick skips
-        self.configured = false;
-        return;
+        // EGL surface creation failed for this output -- fall through to
+        // the SHM/CPU path so the surface can still render via software.
+        std.debug.print("configure: EGL surface unavailable, falling back to SHM\n", .{});
+        self.egl_ctx = null;
     }
 
     // --- SHM/CPU fallback path ---

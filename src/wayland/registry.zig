@@ -74,14 +74,21 @@ fn registryGlobal(
             .height = 0,
             .refresh_mhz = 0,
             .done = false,
+            .removed = false,
             .allocator = self.allocator,
         };
-        // Append only; do NOT register wl_output listener here.
-        // The ArrayList may reallocate on subsequent appends, which would
-        // invalidate any pointer passed as listener data.  Listeners are
-        // attached in a second pass after all outputs have been collected
-        // (see App.init).
+        // Capacity is pre-reserved in App.init (MAX_OUTPUTS) so appends
+        // after startup do not reallocate and existing item pointers
+        // (used as wl_output listener userdata) remain valid.
         outputs.append(self.allocator, info) catch return;
+
+        // If listeners have already been attached (post-startup hotplug),
+        // attach immediately -- the pointer is stable because capacity
+        // was pre-reserved.
+        const new_out = &outputs.items[outputs.items.len - 1];
+        if (new_out.wl_output) |out| {
+            _ = c.wl_output_add_listener(out, &@import("output.zig").output_listener, new_out);
+        }
     }
 }
 

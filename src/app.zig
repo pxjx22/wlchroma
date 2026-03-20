@@ -45,16 +45,17 @@ pub const App = struct {
 
         try app.registry.bind(display, &app.outputs, allocator);
 
-        // 1st roundtrip: bind all globals (outputs appended to ArrayList)
-        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
+        // Pre-reserve capacity so that appends from registryGlobal (both
+        // during the startup roundtrip and from runtime hotplug) never
+        // reallocate the backing array.  This keeps item pointers stable
+        // for use as wl_output listener userdata.
+        const MAX_OUTPUTS = 32;
+        try app.outputs.ensureTotalCapacity(allocator, MAX_OUTPUTS);
 
-        // Attach wl_output listeners now that the ArrayList is stable --
-        // no more appends will invalidate item pointers.
-        for (app.outputs.items) |*out| {
-            if (out.wl_output) |wl_out| {
-                _ = c.wl_output_add_listener(wl_out, &@import("wayland/output.zig").output_listener, out);
-            }
-        }
+        // 1st roundtrip: bind all globals (outputs appended to ArrayList).
+        // registryGlobal now attaches wl_output listeners immediately on
+        // append, which is safe because capacity is pre-reserved above.
+        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
 
         // 2nd roundtrip: collect all output done events
         if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
@@ -114,22 +115,31 @@ pub const App = struct {
 
         // Initialize GLES2 shader program using the first available EGL surface.
         // The EGL context must be current on this thread before creating GL objects.
+        // Try each surface in turn -- if makeCurrent fails on one (e.g. bad
+        // driver state), continue to the next rather than giving up entirely.
         if (self.egl_ctx) |*ctx| {
+            var shader_ready = false;
             for (self.surfaces.items) |*s| {
                 if (s.egl_surface) |*egl_surf| {
-                    if (egl_surf.makeCurrent(ctx)) {
-                        self.shader = ShaderProgram.init() catch |err| blk: {
-                            std.debug.print("FATAL: ShaderProgram.init failed: {} -- " ++
-                                "EGL surfaces will render black until shader is fixed\n", .{err});
-                            break :blk null;
-                        };
-                        // Bind invariant GL state once -- program, VBO, vertex
-                        // layout. Persists across frames for this single-program
-                        // setup. draw() only uploads per-frame uniforms.
-                        if (self.shader) |*sh| sh.bind(&self.renderer.palette_data);
+                    if (!egl_surf.makeCurrent(ctx)) {
+                        std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
+                        continue;
                     }
+                    self.shader = ShaderProgram.init() catch |err| blk: {
+                        std.debug.print("FATAL: ShaderProgram.init failed: {} -- " ++
+                            "EGL surfaces will render black until shader is fixed\n", .{err});
+                        break :blk null;
+                    };
+                    // Bind invariant GL state once -- program, VBO, vertex
+                    // layout. Persists across frames for this single-program
+                    // setup. draw() only uploads per-frame uniforms.
+                    if (self.shader) |*sh| sh.bind(&self.renderer.palette_data);
+                    shader_ready = true;
                     break;
                 }
+            }
+            if (!shader_ready) {
+                std.debug.print("warning: no EGL surface could be made current; GPU rendering disabled for this session\n", .{});
             }
         }
 

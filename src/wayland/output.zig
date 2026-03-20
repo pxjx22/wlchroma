@@ -10,6 +10,10 @@ pub const OutputInfo = struct {
     /// Stored from the wl_output.mode event for future timer tuning.
     refresh_mhz: i32,
     done: bool,
+    /// Set true when the compositor removes this output via wl_registry.global_remove.
+    /// The OutputInfo entry remains in the ArrayList (stable pointer) but will not
+    /// be used to create new surfaces.
+    removed: bool,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *OutputInfo) void {
