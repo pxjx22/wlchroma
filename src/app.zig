@@ -9,6 +9,7 @@ const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const EglContext = @import("render/egl_context.zig").EglContext;
 const ShaderProgram = @import("render/shader.zig").ShaderProgram;
 const defaults = @import("config/defaults.zig");
+const AppConfig = @import("config/config.zig").AppConfig;
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -20,8 +21,9 @@ pub const App = struct {
     egl_ctx: ?EglContext,
     shader: ?ShaderProgram,
     running: bool,
+    frame_interval_ns: u32,
 
-    pub fn init(allocator: std.mem.Allocator) !App {
+    pub fn init(allocator: std.mem.Allocator, config: AppConfig) !App {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
         errdefer c.wl_display_disconnect(display);
 
@@ -31,10 +33,11 @@ pub const App = struct {
             .registry = Registry{},
             .outputs = .{},
             .surfaces = .{},
-            .renderer = ColormixRenderer.init(defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3),
+            .renderer = ColormixRenderer.init(config.palette[0], config.palette[1], config.palette[2], config.frame_advance_ms),
             .egl_ctx = null,
             .shader = null,
             .running = true,
+            .frame_interval_ns = config.frame_interval_ns,
         };
         errdefer app.registry.deinit();
         errdefer {
@@ -151,8 +154,8 @@ pub const App = struct {
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         defer posix.close(tfd);
 
-        const timer_ns: u32 = defaults.FRAME_INTERVAL_NS;
-        std.debug.print("timer interval: {}ns (fixed 15fps low-power)\n", .{timer_ns});
+        const timer_ns: u32 = self.frame_interval_ns;
+        std.debug.print("timer interval: {}ns ({}fps)\n", .{ timer_ns, 1_000_000_000 / @as(u64, timer_ns) });
 
         const interval = linux.itimerspec{
             .it_value = .{ .sec = 0, .nsec = timer_ns },

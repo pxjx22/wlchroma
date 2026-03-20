@@ -13,6 +13,7 @@ pub const ColormixRenderer = struct {
     pattern_sin_mod: f32,
     palette: [12]Cell,
     last_advance_ms: u32,
+    frame_advance_ms: u32,
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
     /// Computed once at init from the palette; shared across all outputs.
     /// TODO: If palette is made runtime-configurable, palette_data must be
@@ -20,7 +21,7 @@ pub const ColormixRenderer = struct {
     /// re-called (plus shader bind() for the palette uniform).
     palette_data: [36]f32,
 
-    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb) ColormixRenderer {
+    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb, frame_advance_ms: u32) ColormixRenderer {
         var prng = std.Random.DefaultPrng.init(defaults.SEED);
         const random = prng.random();
         const pal = palette_mod.buildPalette(col1, col2, col3);
@@ -30,6 +31,7 @@ pub const ColormixRenderer = struct {
             .pattern_sin_mod = random.float(f32) * std.math.pi * 2.0,
             .palette = pal,
             .last_advance_ms = 0,
+            .frame_advance_ms = frame_advance_ms,
             .palette_data = ShaderProgram.buildPaletteData(&pal),
         };
     }
@@ -43,7 +45,7 @@ pub const ColormixRenderer = struct {
     /// will only increment frames once, keeping all outputs in sync.
     pub fn maybeAdvance(self: *ColormixRenderer, time_ms: u32) void {
         const delta = time_ms -% self.last_advance_ms;
-        if (self.last_advance_ms == 0 or delta >= defaults.FRAME_ADVANCE_MS) {
+        if (self.last_advance_ms == 0 or delta >= self.frame_advance_ms) {
             self.frames += 1;
             self.last_advance_ms = time_ms;
         }
