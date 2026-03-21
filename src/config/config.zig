@@ -29,7 +29,31 @@ pub fn defaultConfig() AppConfig {
 
 const DEFAULT_FPS: u32 = 15;
 
-pub fn loadConfig(allocator: std.mem.Allocator) !AppConfig {
+pub fn loadConfig(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !AppConfig {
+    if (explicit_path) |ep| {
+        return loadConfigFromExplicitPath(allocator, ep);
+    }
+    return loadConfigFromDefaults(allocator);
+}
+
+fn loadConfigFromExplicitPath(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        std.debug.print("config: failed to open {s}: {}\n", .{ path, err });
+        return error.ConfigFileError;
+    };
+    defer file.close();
+
+    const max_size = 64 * 1024;
+    const content = file.readToEndAlloc(allocator, max_size) catch |err| {
+        std.debug.print("config: failed to read config file: {}\n", .{err});
+        return error.ConfigFileError;
+    };
+    defer allocator.free(content);
+
+    return parseAndValidateExistingConfig(content);
+}
+
+fn loadConfigFromDefaults(allocator: std.mem.Allocator) !AppConfig {
     const path = resolveConfigPath(allocator) catch |err| {
         switch (err) {
             error.OutOfMemory => return err,

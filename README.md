@@ -86,6 +86,12 @@ systemctl --user daemon-reload
 systemctl --user enable --now wlchroma.service
 ```
 
+## CLI
+
+`wlchroma` accepts a single optional flag:
+
+- `--config <path>` / `-c <path>` -- load the given config file instead of the default XDG/HOME lookup.
+
 ## Configuration
 
 `wlchroma` looks for a config file in this order:
