@@ -172,11 +172,11 @@ renders, speed works, GPU fallback logs and continues.
   - @agent: `language-experts/zig-developer`
 - [X] T026 [P] Update `config.toml.example` — add `[effect]` section with `name = "colormix"` (commented example of `"glass_drift"`), and `[effect.settings]` with `speed = 1.0` with inline comment explaining the range.
   - @agent: `language-experts/zig-developer`
-- [ ] T027 Checkpoint commit: `refactor: scaffold effect system for multiple shaders`
+- [X] T027 Checkpoint commit: `refactor: scaffold effect system for multiple shaders`
   - @agent: `engineering/git-workflow-master`
-- [ ] T028 Checkpoint commit: `feat: add glass drift shader effect`
+- [X] T028 Checkpoint commit: `feat: add glass drift shader effect`
   - @agent: `engineering/git-workflow-master`
-- [ ] T029 Checkpoint commit: `feat: add effect.settings.speed config`
+- [X] T029 Checkpoint commit: `feat: add effect.settings.speed config`
   - @agent: `engineering/git-workflow-master`
 - [X] T030 Final hardening pass: run `zig build test`; confirm all tests pass including new speed validation tests. Confirm `zig build` with no config produces colormix at 15fps (constitution Principle II). Confirm quickstart.md add-a-third-effect steps are accurate against the final code.
   - @agent: `quality-assurance/code-reviewer`
