@@ -26,6 +26,7 @@ pub const Effect = union(EffectType) {
             .glass_drift => Effect{ .glass_drift = GlassDriftRenderer.init(
                 config.frame_advance_ms,
                 config.speed,
+                config.palette,
             ) },
         };
     }
@@ -93,6 +94,14 @@ pub const Effect = union(EffectType) {
         return switch (self.*) {
             .colormix => null,
             .glass_drift => |*r| r.phase_offset,
+        };
+    }
+
+    /// GlassDrift palette for bind/setStaticUniforms. Null for non-glass_drift.
+    pub fn glassDriftPalette(self: *const Effect) ?[3]Rgb {
+        return switch (self.*) {
+            .colormix => null,
+            .glass_drift => |*r| r.palette,
         };
     }
 };

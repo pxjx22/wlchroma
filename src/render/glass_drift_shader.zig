@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("../wl.zig").c;
 const compileShader = @import("shader.zig").compileShader;
+const Rgb = @import("../config/defaults.zig").Rgb;
 
 pub const GlassDriftShader = struct {
     program: c.GLuint,
@@ -10,6 +11,9 @@ pub const GlassDriftShader = struct {
     u_time_loc: c.GLint,
     u_resolution_loc: c.GLint,
     u_phase_loc: c.GLint,
+    u_col0_loc: c.GLint,
+    u_col1_loc: c.GLint,
+    u_col2_loc: c.GLint,
     /// Debug-only flag: set to true after bind() is called.
     bound: bool,
 
@@ -22,29 +26,25 @@ pub const GlassDriftShader = struct {
         \\}
     ;
 
-    // Fragment shader: three sinusoidal pane layers with fixed frosted-glass
-    // palette. No loops, no sqrt — arithmetic cost is O(1) per fragment.
-    //
-    // Color palette (hardcoded constants in shader source):
-    //   ice blue    #7BA9CC  → vec3(0.4824, 0.6627, 0.8000)
-    //   pale silver #BCC9D8  → vec3(0.7373, 0.7882, 0.8471)
-    //   deep slate  #4A6B88  → vec3(0.2902, 0.4196, 0.5333)
+    // Fragment shader: three sinusoidal pane layers with config-driven palette.
+    // No loops, no sqrt — arithmetic cost is O(1) per fragment.
     //
     // Uniforms:
     //   u_time       f32  — frameCount * TIME_SCALE * speed (per-frame)
     //   u_resolution vec2 — output pixel dimensions (per-surface)
     //   u_phase      f32  — random session offset (static, set once in bind)
+    //   u_col0       vec3 — base color       (palette[0])
+    //   u_col1       vec3 — primary tint     (palette[1])
+    //   u_col2       vec3 — secondary tint   (palette[2])
     const frag_src: [*:0]const u8 =
         \\#version 100
         \\precision highp float;
         \\uniform float u_time;
         \\uniform vec2 u_resolution;
         \\uniform float u_phase;
-        \\
-        \\// Frosted-glass color palette (fixed)
-        \\const vec3 ICE_BLUE    = vec3(0.4824, 0.6627, 0.8000);
-        \\const vec3 PALE_SILVER = vec3(0.7373, 0.7882, 0.8471);
-        \\const vec3 DEEP_SLATE  = vec3(0.2902, 0.4196, 0.5333);
+        \\uniform vec3 u_col0;
+        \\uniform vec3 u_col1;
+        \\uniform vec3 u_col2;
         \\
         \\void main() {
         \\    // Normalized UV with aspect correction
@@ -61,11 +61,11 @@ pub const GlassDriftShader = struct {
         \\    float pane1 = sin(p.y * 2.0 - t * 0.3 + 1.0) * 0.5 + 0.5;
         \\    float pane2 = sin((p.x - p.y) * 1.5 + t * 0.4 + 2.5) * 0.5 + 0.5;
         \\
-        \\    // Layer blend: deep slate base tinted with ice blue and pale silver
-        \\    vec3 col = DEEP_SLATE;
-        \\    col = mix(col, ICE_BLUE,    pane0 * 0.6);
-        \\    col = mix(col, PALE_SILVER, pane1 * 0.5);
-        \\    col = mix(col, ICE_BLUE,    pane2 * 0.4);
+        \\    // Layer blend: u_col0 base tinted with u_col1 and u_col2
+        \\    vec3 col = u_col0;
+        \\    col = mix(col, u_col1, pane0 * 0.6);
+        \\    col = mix(col, u_col2, pane1 * 0.5);
+        \\    col = mix(col, u_col1, pane2 * 0.4);
         \\
         \\    gl_FragColor = vec4(col, 1.0);
         \\}
@@ -108,6 +108,12 @@ pub const GlassDriftShader = struct {
         if (u_resolution_loc < 0) return error.GlUniformNotFound;
         const u_phase_loc = c.glGetUniformLocation(program, "u_phase");
         if (u_phase_loc < 0) return error.GlUniformNotFound;
+        const u_col0_loc = c.glGetUniformLocation(program, "u_col0");
+        if (u_col0_loc < 0) return error.GlUniformNotFound;
+        const u_col1_loc = c.glGetUniformLocation(program, "u_col1");
+        if (u_col1_loc < 0) return error.GlUniformNotFound;
+        const u_col2_loc = c.glGetUniformLocation(program, "u_col2");
+        if (u_col2_loc < 0) return error.GlUniformNotFound;
 
         const vertices = [_]f32{
             -1.0, -1.0,
@@ -134,13 +140,16 @@ pub const GlassDriftShader = struct {
             .u_time_loc = u_time_loc,
             .u_resolution_loc = u_resolution_loc,
             .u_phase_loc = u_phase_loc,
+            .u_col0_loc = u_col0_loc,
+            .u_col1_loc = u_col1_loc,
+            .u_col2_loc = u_col2_loc,
             .bound = false,
         };
     }
 
-    /// Bind GL state and upload the static phase uniform.
+    /// Bind GL state and upload static uniforms (phase + palette).
     /// Call once after the EGL context is made current.
-    pub fn bind(self: *GlassDriftShader, phase_offset: f32) void {
+    pub fn bind(self: *GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
         c.glUseProgram(self.program);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
@@ -152,13 +161,31 @@ pub const GlassDriftShader = struct {
             0,
             @as(?*const anyopaque, null),
         );
-        c.glUniform1f(self.u_phase_loc, phase_offset);
+        uploadStaticUniforms(self, phase_offset, palette);
         self.bound = true;
     }
 
-    /// Re-upload phase after configure/resize (program must be current).
-    pub fn setStaticUniforms(self: *const GlassDriftShader, phase_offset: f32) void {
+    /// Re-upload static uniforms after configure/resize (program must be current).
+    pub fn setStaticUniforms(self: *const GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
+        uploadStaticUniforms(self, phase_offset, palette);
+    }
+
+    fn uploadStaticUniforms(self: *const GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
         c.glUniform1f(self.u_phase_loc, phase_offset);
+        inline for (palette, 0..) |rgb, i| {
+            const loc = switch (i) {
+                0 => self.u_col0_loc,
+                1 => self.u_col1_loc,
+                2 => self.u_col2_loc,
+                else => unreachable,
+            };
+            c.glUniform3f(
+                loc,
+                @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            );
+        }
     }
 
     /// Upload per-frame uniforms: time and resolution.

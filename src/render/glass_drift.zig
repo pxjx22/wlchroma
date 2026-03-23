@@ -1,4 +1,5 @@
 const std = @import("std");
+const Rgb = @import("../config/defaults.zig").Rgb;
 
 pub const GlassDriftRenderer = struct {
     frames: u64,
@@ -9,8 +10,11 @@ pub const GlassDriftRenderer = struct {
     /// Uploaded once as a static uniform to give each session a unique
     /// starting visual state.
     phase_offset: f32,
+    /// Three-color palette from config. Uploaded as static uniforms.
+    /// palette[0] = base, palette[1] = primary tint, palette[2] = secondary tint.
+    palette: [3]Rgb,
 
-    pub fn init(frame_advance_ms: u32, speed: f32) GlassDriftRenderer {
+    pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) GlassDriftRenderer {
         const ts = std.time.milliTimestamp();
         const seed: u64 = @bitCast(ts);
         var prng = std.Random.DefaultPrng.init(seed);
@@ -21,6 +25,7 @@ pub const GlassDriftRenderer = struct {
             .frame_advance_ms = frame_advance_ms,
             .speed = speed,
             .phase_offset = random.float(f32) * std.math.pi * 2.0,
+            .palette = palette,
         };
     }
 

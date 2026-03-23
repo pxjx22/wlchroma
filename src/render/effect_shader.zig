@@ -24,16 +24,16 @@ pub const EffectShader = union(EffectType) {
 
     /// Bind invariant GL state (program, VBO, vertex layout, static data).
     /// Call once after EGL context is current. For colormix: uploads palette.
-    /// For glass_drift: uploads phase offset.
+    /// For glass_drift: uploads phase offset + palette.
     pub fn bind(self: *EffectShader, effect: *const Effect) void {
         switch (self.*) {
             .colormix => |*sh| sh.bind(effect.paletteData().?),
-            .glass_drift => |*sh| sh.bind(effect.phaseOffset().?),
+            .glass_drift => |*sh| sh.bind(effect.phaseOffset().?, effect.glassDriftPalette().?),
         }
     }
 
     /// Upload static uniforms that change only on configure/resize.
-    /// For colormix: cos_mod + sin_mod. For glass_drift: phase_offset.
+    /// For colormix: cos_mod + sin_mod. For glass_drift: phase_offset + palette.
     /// Assumes the effect program is already current (bound via bind()).
     pub fn setStaticUniforms(self: *const EffectShader, effect: *const Effect) void {
         switch (self.*) {
@@ -41,7 +41,7 @@ pub const EffectShader = union(EffectType) {
                 const mods = effect.patternMods().?;
                 sh.setStaticUniforms(mods.cos_mod, mods.sin_mod);
             },
-            .glass_drift => |*sh| sh.setStaticUniforms(effect.phaseOffset().?),
+            .glass_drift => |*sh| sh.setStaticUniforms(effect.phaseOffset().?, effect.glassDriftPalette().?),
         }
     }
 
