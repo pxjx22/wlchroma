@@ -1,7 +1,7 @@
 const std = @import("std");
 const defaults = @import("../config/defaults.zig");
 const palette_mod = @import("palette.zig");
-const ShaderProgram = @import("shader.zig").ShaderProgram;
+const ColormixShader = @import("colormix_shader.zig").ColormixShader;
 
 pub const Rgb = defaults.Rgb;
 const Cell = defaults.Cell;
@@ -14,14 +14,12 @@ pub const ColormixRenderer = struct {
     palette: [12]Cell,
     last_advance_ms: u32,
     frame_advance_ms: u32,
+    speed: f32,
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
     /// Computed once at init from the palette; shared across all outputs.
-    /// TODO: If palette is made runtime-configurable, palette_data must be
-    /// rebuilt and SurfaceState.palette_data updated, then setStaticUniforms
-    /// re-called (plus shader bind() for the palette uniform).
     palette_data: [36]f32,
 
-    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb, frame_advance_ms: u32) ColormixRenderer {
+    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb, frame_advance_ms: u32, speed: f32) ColormixRenderer {
         var prng = std.Random.DefaultPrng.init(defaults.SEED);
         const random = prng.random();
         const pal = palette_mod.buildPalette(col1, col2, col3);
@@ -32,7 +30,8 @@ pub const ColormixRenderer = struct {
             .palette = pal,
             .last_advance_ms = 0,
             .frame_advance_ms = frame_advance_ms,
-            .palette_data = ShaderProgram.buildPaletteData(&pal),
+            .speed = speed,
+            .palette_data = ColormixShader.buildPaletteData(&pal),
         };
     }
 

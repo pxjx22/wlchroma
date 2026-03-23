@@ -8,5 +8,14 @@ scale = 1.0
 # "nearest" looks crisper/blockier; "linear" looks smoother/softer.
 upscale_filter = "nearest"
 
+[effect]
+# Active wallpaper effect. Options: "colormix" (default), "glass_drift".
+# glass_drift requires GPU (EGL); falls back to colormix if GPU is unavailable.
+name = "colormix"
+# name = "glass_drift"
+
 [effect.settings]
+# Animation speed multiplier. Range: 0.25–2.5. Default: 1.0.
+# Applies to all effects. Out-of-range values are rejected at startup.
+speed = 1.0
 palette = ["#1e1e2e", "#89b4fa", "#a6e3a1"]

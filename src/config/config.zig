@@ -7,11 +7,18 @@ pub const UpscaleFilter = enum {
     linear,
 };
 
+pub const EffectType = enum {
+    colormix,
+    glass_drift,
+};
+
 pub const AppConfig = struct {
     fps: u32,
     frame_interval_ns: u32,
     frame_advance_ms: u32,
+    effect_type: EffectType,
     palette: [3]Rgb,
+    speed: f32,
     renderer_scale: f32,
     upscale_filter: UpscaleFilter,
 };
@@ -21,7 +28,9 @@ pub fn defaultConfig() AppConfig {
         .fps = DEFAULT_FPS,
         .frame_interval_ns = defaults.FRAME_INTERVAL_NS,
         .frame_advance_ms = defaults.FRAME_ADVANCE_MS,
+        .effect_type = .colormix,
         .palette = .{ defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3 },
+        .speed = 1.0,
         .renderer_scale = 1.0,
         .upscale_filter = .nearest,
     };
@@ -283,16 +292,17 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                 }
             },
             .effect => {
-                // Reserved/internal compatibility field for v1. It is accepted so
-                // configs can pin the only supported effect today without widening
-                // the public surface beyond the example config.
                 if (std.mem.eql(u8, kv.key, "name")) {
                     const val = parseQuotedString(kv.value) orelse {
                         std.debug.print("config: line {}: 'name' must be a quoted string\n", .{line_num});
                         return error.InvalidValue;
                     };
-                    if (!std.mem.eql(u8, val, "colormix")) {
-                        std.debug.print("config: line {}: unsupported effect.name \"{s}\", only \"colormix\" is supported in v1\n", .{ line_num, val });
+                    if (std.mem.eql(u8, val, "colormix")) {
+                        config.effect_type = .colormix;
+                    } else if (std.mem.eql(u8, val, "glass_drift")) {
+                        config.effect_type = .glass_drift;
+                    } else {
+                        std.debug.print("config: line {}: unsupported effect.name \"{s}\"\n", .{ line_num, val });
                         return error.UnsupportedEffect;
                     }
                 } else {
@@ -300,7 +310,17 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                 }
             },
             .effect_settings => {
-                if (std.mem.eql(u8, kv.key, "palette")) {
+                if (std.mem.eql(u8, kv.key, "speed")) {
+                    const speed = parseFloat(kv.value) orelse {
+                        std.debug.print("config: line {}: 'effect.settings.speed' must be a number\n", .{line_num});
+                        return error.InvalidValue;
+                    };
+                    if (!std.math.isFinite(speed) or speed < 0.25 or speed > 2.5) {
+                        std.debug.print("config: line {}: 'effect.settings.speed' must be between 0.25 and 2.5, got {d}\n", .{ line_num, speed });
+                        return error.InvalidValue;
+                    }
+                    config.speed = speed;
+                } else if (std.mem.eql(u8, kv.key, "palette")) {
                     const colors = parseStringArray(kv.value) orelse {
                         std.debug.print("config: line {}: 'palette' must be an array of exactly 3 quoted '#RRGGBB' strings\n", .{line_num});
                         return error.InvalidValue;
@@ -388,7 +408,7 @@ fn shouldTrackKey(section: Section, key: []const u8) bool {
         .top => std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "fps"),
         .outputs => std.mem.eql(u8, key, "policy"),
         .effect => std.mem.eql(u8, key, "name"),
-        .effect_settings => std.mem.eql(u8, key, "palette"),
+        .effect_settings => std.mem.eql(u8, key, "palette") or std.mem.eql(u8, key, "speed"),
         .renderer => std.mem.eql(u8, key, "scale") or std.mem.eql(u8, key, "upscale_filter"),
         .unknown => false,
     };
@@ -774,4 +794,44 @@ test "frame_advance_ms at 120fps" {
     const cfg = try parseAndValidate(toml);
     // 1000*9 / (120*10) = 9000/1200 = 7
     try std.testing.expectEqual(@as(u32, 7), cfg.frame_advance_ms);
+}
+
+test "parseAndValidate glass_drift effect" {
+    const toml = "[effect]\nname = \"glass_drift\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.glass_drift, cfg.effect_type);
+}
+
+test "parseAndValidate colormix effect explicit" {
+    const toml = "[effect]\nname = \"colormix\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.colormix, cfg.effect_type);
+}
+
+test "parseAndValidate speed valid min" {
+    const toml = "[effect.settings]\nspeed = 0.25\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), cfg.speed, 0.001);
+}
+
+test "parseAndValidate speed valid max" {
+    const toml = "[effect.settings]\nspeed = 2.5\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), cfg.speed, 0.001);
+}
+
+test "parseAndValidate speed too low" {
+    const toml = "[effect.settings]\nspeed = 0.24\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate speed too high" {
+    const toml = "[effect.settings]\nspeed = 2.51\n";
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+}
+
+test "parseAndValidate speed missing uses default" {
+    const toml = "";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.speed, 0.001);
 }

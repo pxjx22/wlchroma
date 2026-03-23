@@ -107,7 +107,9 @@ The public v1 config surface is:
 - `fps`
 - `[renderer].scale`
 - `[renderer].upscale_filter`
+- `[effect].name`
 - `[effect.settings].palette`
+- `[effect.settings].speed`
 
 Start from `config.toml.example`:
 
@@ -125,12 +127,15 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 - `renderer.upscale_filter = "nearest"` keeps the upscaled image crisp and blocky. `"linear"` smooths it out, but can look blurrier.
 - `renderer.scale` and `renderer.upscale_filter` matter only on the EGL/GPU reduced-resolution path. If `wlchroma` falls back to the CPU/SHM renderer, those knobs do not change the output path.
 - `[effect.settings].palette` must contain exactly three `"#RRGGBB"` colors.
+- `[effect].name` selects the active wallpaper effect. Supported values: `"colormix"` (default) and `"glass_drift"`. An unknown value exits at startup with a clear error.
+- `"glass_drift"` renders a layered frosted-glass pane animation using a fixed palette: ice blue (`#7BA9CC`), pale silver (`#BCC9D8`), and deep slate (`#4A6B88`). It requires GPU (EGL). If EGL is unavailable, `wlchroma` falls back to colormix automatically and logs a warning.
+- `[effect.settings].speed` scales animation velocity for whichever effect is active. Valid range: `0.25`–`2.5`. Defaults to `1.0`. Out-of-range values exit at startup with a clear error.
 
 ## Limitations
 
 - Linux Wayland only; no X11 support
 - Requires a Wayland compositor that exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`)
-- The public v1 effect surface is intentionally small: one colormix effect with a 3-color palette
+- The public v1 effect surface is intentionally small: two effects (`colormix` and `glass_drift`); further effects are out of scope for this release
 - Multi-monitor output is supported, but all outputs use the same global config; there is no per-output config yet
 - Outputs added after `wlchroma` starts do not get a wallpaper surface until you restart it
 
