@@ -3,3 +3,10 @@ zig-out/
 *.o
 *.ppm
 *.png
+
+# Scaffolding and local tooling — not part of the project source
+.claude/
+.specify/
+specs/
+appbreaker.md
+CLAUDE.md
