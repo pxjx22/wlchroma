@@ -10,6 +10,15 @@ pub const UpscaleFilter = enum {
 pub const EffectType = enum {
     colormix,
     glass_drift,
+    aurora_bands,
+    cloud_chamber,
+    ribbon_orbit,
+    plasma_quilt,
+    liquid_marble,
+    velvet_mesh,
+    soft_interference,
+    starfield_fog,
+    tube_lights,
 };
 
 pub const AppConfig = struct {
@@ -297,13 +306,11 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                         std.debug.print("config: line {}: 'name' must be a quoted string\n", .{line_num});
                         return error.InvalidValue;
                     };
-                    if (std.mem.eql(u8, val, "colormix")) {
-                        config.effect_type = .colormix;
-                    } else if (std.mem.eql(u8, val, "glass_drift")) {
-                        config.effect_type = .glass_drift;
+                    if (std.meta.stringToEnum(EffectType, val)) |effect_type| {
+                        config.effect_type = effect_type;
                     } else {
-                        std.debug.print("config: line {}: unsupported effect.name \"{s}\"\n", .{ line_num, val });
-                        return error.UnsupportedEffect;
+                        std.debug.print("config: unknown effect name \"{s}\"\n", .{val});
+                        return error.ConfigError;
                     }
                 } else {
                     std.debug.print("config: line {}: ignoring unknown key 'effect.{s}'\n", .{ line_num, kv.key });

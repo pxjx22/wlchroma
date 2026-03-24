@@ -74,6 +74,7 @@ pub const BlitShader = struct {
         };
         var vbo: c.GLuint = 0;
         c.glGenBuffers(1, &vbo);
+        if (vbo == 0) return error.GlGenBuffersFailed;
         errdefer c.glDeleteBuffers(1, &vbo);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
         c.glBufferData(

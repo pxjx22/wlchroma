@@ -85,8 +85,10 @@ pub const ColormixShader = struct {
         c.glGetProgramiv(program, c.GL_LINK_STATUS, &link_status);
         if (link_status == 0) {
             var buf: [512]u8 = std.mem.zeroes([512]u8);
-            c.glGetProgramInfoLog(program, 512, null, &buf);
-            std.debug.print("colormix program link error: {s}\n", .{@as([*:0]const u8, @ptrCast(&buf))});
+            var log_len: c.GLsizei = 0;
+            c.glGetProgramInfoLog(program, 512, &log_len, &buf);
+            const log_slice = buf[0..@intCast(log_len)];
+            std.debug.print("colormix program link error: {s}\n", .{log_slice});
             return error.GlLinkFailed;
         }
 
@@ -116,6 +118,7 @@ pub const ColormixShader = struct {
         };
         var vbo: c.GLuint = 0;
         c.glGenBuffers(1, &vbo);
+        if (vbo == 0) return error.GlGenBuffersFailed;
         errdefer c.glDeleteBuffers(1, &vbo);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, vbo);
         c.glBufferData(
@@ -175,6 +178,7 @@ pub const ColormixShader = struct {
     }
 
     pub fn deinit(self: *ColormixShader) void {
+        c.glDisableVertexAttribArray(self.a_pos_loc);
         c.glDeleteBuffers(1, &self.vbo);
         c.glDeleteProgram(self.program);
     }

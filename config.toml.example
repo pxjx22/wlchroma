@@ -9,10 +9,19 @@ scale = 1.0
 upscale_filter = "nearest"
 
 [effect]
-# Active wallpaper effect. Options: "colormix" (default), "glass_drift".
-# glass_drift requires GPU (EGL); falls back to colormix if GPU is unavailable.
+# Active wallpaper effect. All GPU effects require EGL; they fall back to
+# colormix automatically if GPU is unavailable.
 name = "colormix"
 # name = "glass_drift"
+# name = "aurora_bands"
+# name = "cloud_chamber"
+# name = "ribbon_orbit"
+# name = "plasma_quilt"
+# name = "liquid_marble"
+# name = "velvet_mesh"
+# name = "soft_interference"
+# name = "starfield_fog"
+# name = "tube_lights"
 
 [effect.settings]
 # Animation speed multiplier. Range: 0.25–2.5. Default: 1.0.
