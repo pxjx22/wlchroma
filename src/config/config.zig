@@ -310,7 +310,7 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                         config.effect_type = effect_type;
                     } else {
                         std.debug.print("config: unknown effect name \"{s}\"\n", .{val});
-                        return error.ConfigError;
+                        return error.UnsupportedEffect;
                     }
                 } else {
                     std.debug.print("config: line {}: ignoring unknown key 'effect.{s}'\n", .{ line_num, kv.key });
