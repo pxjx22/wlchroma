@@ -127,15 +127,30 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 - `renderer.upscale_filter = "nearest"` keeps the upscaled image crisp and blocky. `"linear"` smooths it out, but can look blurrier.
 - `renderer.scale` and `renderer.upscale_filter` matter only on the EGL/GPU reduced-resolution path. If `wlchroma` falls back to the CPU/SHM renderer, those knobs do not change the output path.
 - `[effect.settings].palette` must contain exactly three `"#RRGGBB"` colors.
-- `[effect].name` selects the active wallpaper effect. Supported values: `"colormix"` (default) and `"glass_drift"`. An unknown value exits at startup with a clear error.
-- `"glass_drift"` renders a layered frosted-glass pane animation using a fixed palette: ice blue (`#7BA9CC`), pale silver (`#BCC9D8`), and deep slate (`#4A6B88`). It requires GPU (EGL). If EGL is unavailable, `wlchroma` falls back to colormix automatically and logs a warning.
+- `[effect].name` selects the active wallpaper effect. An unknown value exits at startup with a clear error. Supported values:
+
+| Name | Description |
+|---|---|
+| `"colormix"` | Smooth CPU-rendered color gradient blend across the palette (default; works without GPU) |
+| `"glass_drift"` | Layered frosted-glass pane animation using three sinusoidal drifting planes |
+| `"aurora_bands"` | Diagonal aurora ribbons — three sheared sin waves drifting across both axes for an organic banded aurora feel |
+| `"cloud_chamber"` | Soft slow fog using products of two-axis sin waves blended over a stable base colour for a gentle atmospheric look |
+| `"ribbon_orbit"` | Soft polar-coordinate arcs orbiting the screen center with a slow ambient fill between them (recommended speed: 1.0) |
+| `"plasma_quilt"` | Classic plasma: four angled sin waves in opposing directions produce a smoothly churning colour field (recommended speed: 0.7) |
+| `"liquid_marble"` | UV-warped fract banding with wide smoothstep veins and a shimmer layer for a flowing marble stone look |
+| `"velvet_mesh"` | Glowing abs(sin) lattice grid with a soft square-bloom highlight on intersections and a subtle colour shimmer between nodes |
+| `"soft_interference"` | Drifting concentric interference rings from two slowly orbiting focal points |
+| `"starfield_fog"` | Procedural hash-based star field with additive star glow on a smoothly varying nebula fog backdrop |
+| `"tube_lights"` | Neon tube bands with smooth colour crossfades, depth-modulated highlights, and slowly scrolling surface shading (recommended speed: 0.8) |
+
+All GPU effects require EGL. If EGL is unavailable, `wlchroma` falls back to `colormix` automatically and logs a warning.
 - `[effect.settings].speed` scales animation velocity for whichever effect is active. Valid range: `0.25`–`2.5`. Defaults to `1.0`. Out-of-range values exit at startup with a clear error.
 
 ## Limitations
 
 - Linux Wayland only; no X11 support
 - Requires a Wayland compositor that exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`)
-- The public v1 effect surface is intentionally small: two effects (`colormix` and `glass_drift`); further effects are out of scope for this release
+- The public v1 effect surface includes eleven effects (`colormix`, `glass_drift`, and nine GPU shader effects); there is no per-output effect config yet
 - Multi-monitor output is supported, but all outputs use the same global config; there is no per-output config yet
 - Outputs added after `wlchroma` starts do not get a wallpaper surface until you restart it
 
