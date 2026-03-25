@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     xdg_scan_src.addFileArg(xdg_xml);
     const xdg_src = xdg_scan_src.addOutputFileArg("xdg-shell-client-protocol.c");
 
+    // --- wlchroma (wallpaper daemon) ---
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
