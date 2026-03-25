@@ -15,6 +15,8 @@ pub const Registry = struct {
     compositor: ?*c.wl_compositor = null,
     shm: ?*c.wl_shm = null,
     layer_shell: ?*c.zwlr_layer_shell_v1 = null,
+    session_lock_manager: ?*c.ext_session_lock_manager_v1 = null,
+    seat: ?*c.wl_seat = null,
     wl_registry: ?*c.wl_registry = null,
     outputs: ?*std.ArrayList(OutputInfo) = null,
     allocator: std.mem.Allocator = undefined,
@@ -32,10 +34,14 @@ pub const Registry = struct {
         if (self.compositor) |comp| c.wl_compositor_destroy(comp);
         if (self.shm) |shm| c.wl_shm_destroy(shm);
         if (self.layer_shell) |ls| c.zwlr_layer_shell_v1_destroy(ls);
+        if (self.session_lock_manager) |slm| c.ext_session_lock_manager_v1_destroy(slm);
+        if (self.seat) |seat| c.wl_seat_destroy(seat);
         if (self.wl_registry) |reg| c.wl_registry_destroy(reg);
         self.compositor = null;
         self.shm = null;
         self.layer_shell = null;
+        self.session_lock_manager = null;
+        self.seat = null;
         self.wl_registry = null;
     }
 };
@@ -59,6 +65,20 @@ fn registryGlobal(
         self.shm = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_shm_interface, 1));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.zwlr_layer_shell_v1_interface.name, 0))) {
         self.layer_shell = @ptrCast(c.wl_registry_bind(registry, name, &c.zwlr_layer_shell_v1_interface, 4));
+    } else if (std.mem.eql(u8, iface, "ext_session_lock_manager_v1")) {
+        self.session_lock_manager = @ptrCast(c.wl_registry_bind(
+            registry,
+            name,
+            &c.ext_session_lock_manager_v1_interface,
+            1,
+        ));
+    } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_seat_interface.name, 0))) {
+        self.seat = @ptrCast(c.wl_registry_bind(
+            registry,
+            name,
+            &c.wl_seat_interface,
+            @min(version, 7),
+        ));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_output_interface.name, 0))) {
         // Bind at most version 3: gives done + mode + geometry events.
         // Version 4 adds name/description which are nice-to-have but many
