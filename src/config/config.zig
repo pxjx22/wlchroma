@@ -10,15 +10,10 @@ pub const UpscaleFilter = enum {
 pub const EffectType = enum {
     colormix,
     glass_drift,
-    aurora_bands,
-    cloud_chamber,
-    ribbon_orbit,
-    plasma_quilt,
-    liquid_marble,
+    frond_haze,
+    lumen_tunnel,
     velvet_mesh,
-    soft_interference,
     starfield_fog,
-    tube_lights,
 };
 
 pub const AppConfig = struct {
@@ -807,6 +802,18 @@ test "parseAndValidate glass_drift effect" {
     const toml = "[effect]\nname = \"glass_drift\"\n";
     const cfg = try parseAndValidate(toml);
     try std.testing.expectEqual(EffectType.glass_drift, cfg.effect_type);
+}
+
+test "parseAndValidate frond_haze effect" {
+    const toml = "[effect]\nname = \"frond_haze\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.frond_haze, cfg.effect_type);
+}
+
+test "parseAndValidate lumen_tunnel effect" {
+    const toml = "[effect]\nname = \"lumen_tunnel\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.lumen_tunnel, cfg.effect_type);
 }
 
 test "parseAndValidate colormix effect explicit" {

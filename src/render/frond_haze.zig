@@ -1,7 +1,7 @@
 const std = @import("std");
 const Rgb = @import("../config/defaults.zig").Rgb;
 
-pub const PlasmaQuiltRenderer = struct {
+pub const FrondHazeRenderer = struct {
     frames: u64,
     last_advance_ms: u32,
     frame_advance_ms: u32,
@@ -9,7 +9,7 @@ pub const PlasmaQuiltRenderer = struct {
     phase_offset: f32,
     palette: [3]Rgb,
 
-    pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) PlasmaQuiltRenderer {
+    pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) FrondHazeRenderer {
         const ts = std.time.milliTimestamp();
         const seed: u64 = @bitCast(ts);
         var prng = std.Random.DefaultPrng.init(seed);
@@ -24,7 +24,7 @@ pub const PlasmaQuiltRenderer = struct {
         };
     }
 
-    pub fn maybeAdvance(self: *PlasmaQuiltRenderer, time_ms: u32) void {
+    pub fn maybeAdvance(self: *FrondHazeRenderer, time_ms: u32) void {
         const delta = time_ms -% self.last_advance_ms;
         if (self.last_advance_ms == 0 or delta >= self.frame_advance_ms) {
             self.frames += 1;

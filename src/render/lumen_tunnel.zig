@@ -1,20 +1,15 @@
 const std = @import("std");
 const Rgb = @import("../config/defaults.zig").Rgb;
 
-pub const AuroraBandsRenderer = struct {
+pub const LumenTunnelRenderer = struct {
     frames: u64,
     last_advance_ms: u32,
     frame_advance_ms: u32,
     speed: f32,
-    /// Random phase offset seeded at init via std.Random.DefaultPrng.
-    /// Uploaded once as a static uniform to give each session a unique
-    /// starting visual state.
     phase_offset: f32,
-    /// Three-color palette from config. Uploaded as static uniforms.
-    /// palette[0] = base, palette[1] = primary tint, palette[2] = secondary tint.
     palette: [3]Rgb,
 
-    pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) AuroraBandsRenderer {
+    pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) LumenTunnelRenderer {
         const ts = std.time.milliTimestamp();
         const seed: u64 = @bitCast(ts);
         var prng = std.Random.DefaultPrng.init(seed);
@@ -29,9 +24,7 @@ pub const AuroraBandsRenderer = struct {
         };
     }
 
-    /// Advance the frame counter at most once per frame interval.
-    /// Mirrors GlassDriftRenderer.maybeAdvance gate logic exactly.
-    pub fn maybeAdvance(self: *AuroraBandsRenderer, time_ms: u32) void {
+    pub fn maybeAdvance(self: *LumenTunnelRenderer, time_ms: u32) void {
         const delta = time_ms -% self.last_advance_ms;
         if (self.last_advance_ms == 0 or delta >= self.frame_advance_ms) {
             self.frames += 1;
