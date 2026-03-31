@@ -462,8 +462,39 @@ pub const App = struct {
     }
 
     fn handleReload(self: *App, client_fd: posix.fd_t) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
+        const path = self.config_path orelse {
+            dispatch.writeError(client_fd, "no config path known");
+            return;
+        };
+        const load_result = config_mod.loadConfigFull(self.allocator, path) catch |err| {
+            var buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "config parse error: {}", .{err}) catch "config parse error";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        // Apply new config — update fields without tearing down EGL or surfaces.
+        // 1. fps / timerfd
+        const new_interval_ns = load_result.config.frame_interval_ns;
+        const new_interval = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = new_interval_ns },
+            .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
+        };
+        posix.timerfd_settime(self.tfd, .{}, &new_interval, null) catch {};
+        self.frame_interval_ns = new_interval_ns;
+        // 2. renderer_scale
+        self.renderer_scale = load_result.config.renderer_scale;
+        for (self.surfaces.items) |*s| {
+            s.renderer_scale = load_result.config.renderer_scale;
+        }
+        // 3. palette colors (stays within the same effect type — no shader rebind type mismatch)
+        self.effect.updatePalette(load_result.config.palette);
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        // 4. named palettes — replace the owned slice
+        self.allocator.free(self.palettes);
+        self.palettes = load_result.palettes;
+        // 5. reset active palette name (reload resets to config colors, i.e. "custom")
+        self.active_palette_name_len = 0;
+        dispatch.writeOk(client_fd);
     }
 
     pub fn deinit(self: *App) void {
