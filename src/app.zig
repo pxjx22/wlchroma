@@ -376,8 +376,28 @@ pub const App = struct {
     // --- IPC command handlers (stubs — filled in per user story phase) ---
 
     fn handleQuery(self: *App, client_fd: posix.fd_t) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
+        // effect=<tag name>
+        dispatch.writeKv(client_fd, "effect", @tagName(self.effect));
+
+        // fps=<computed from frame_interval_ns>
+        const fps = 1_000_000_000 / @as(u64, self.frame_interval_ns);
+        var fps_buf: [16]u8 = undefined;
+        const fps_str = std.fmt.bufPrint(&fps_buf, "{}", .{fps}) catch "?";
+        dispatch.writeKv(client_fd, "fps", fps_str);
+
+        // scale=<2 decimal places>
+        var scale_buf: [16]u8 = undefined;
+        const scale_str = std.fmt.bufPrint(&scale_buf, "{d:.2}", .{self.renderer_scale}) catch "?";
+        dispatch.writeKv(client_fd, "scale", scale_str);
+
+        // palette=<active name or "custom">
+        const palette_name: []const u8 = if (self.active_palette_name_len > 0)
+            self.active_palette_name_buf[0..self.active_palette_name_len]
+        else
+            "custom";
+        dispatch.writeKv(client_fd, "palette", palette_name);
+
+        dispatch.writeOk(client_fd);
     }
 
     fn handleStop(self: *App, client_fd: posix.fd_t) void {
