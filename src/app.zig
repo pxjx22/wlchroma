@@ -36,6 +36,7 @@ pub const App = struct {
     upscale_filter: UpscaleFilter,
     // --- IPC fields (T009) ---
     tfd: posix.fd_t,
+    sig_fd: posix.fd_t,
     ipc_server: ?IpcServer,
     /// Config path for reload. Null when wlchroma was started without --config
     /// and no default config file was found.
@@ -62,6 +63,16 @@ pub const App = struct {
         const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         errdefer posix.close(tfd);
 
+        // Block SIGTERM and capture it via signalfd so the poll loop handles it
+        // cleanly (triggers deinit, removes socket file). Without this, SIGTERM
+        // kills the process instantly and leaves a stale socket.
+        var sig_mask = posix.sigemptyset();
+        posix.sigaddset(&sig_mask, posix.SIG.TERM);
+        posix.sigprocmask(posix.SIG.BLOCK, &sig_mask, null);
+        const sig_fd_flags: u32 = @bitCast(linux.O{ .NONBLOCK = true, .CLOEXEC = true });
+        const sig_fd = try posix.signalfd(-1, &sig_mask, sig_fd_flags);
+        errdefer posix.close(sig_fd);
+
         var app = App{
             .allocator = allocator,
             .display = display,
@@ -77,6 +88,7 @@ pub const App = struct {
             .renderer_scale = config.renderer_scale,
             .upscale_filter = config.upscale_filter,
             .tfd = tfd,
+            .sig_fd = sig_fd,
             .ipc_server = null,
             .config_path = config_path,
             .palettes = palettes,
@@ -242,13 +254,15 @@ pub const App = struct {
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
         const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
 
-        var fds = [3]posix.pollfd{
+        // fds[0]=wayland  fds[1]=timerfd  fds[2]=signalfd  fds[3]=ipc (optional)
+        var fds = [4]posix.pollfd{
             .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = self.sig_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = ipc_fd, .events = linux.POLL.IN, .revents = 0 },
         };
-        // How many fds are active in the poll call.
-        const nfds: u32 = if (self.ipc_server != null) 3 else 2;
+        // sig_fd is always active; ipc_fd only when the server started.
+        const nfds: u32 = if (self.ipc_server != null) 4 else 3;
 
         while (self.running) {
             if (c.wl_display_flush(self.display) < 0) {
@@ -265,6 +279,7 @@ pub const App = struct {
             fds[0].revents = 0;
             fds[1].revents = 0;
             fds[2].revents = 0;
+            fds[3].revents = 0;
             _ = posix.poll(fds[0..nfds], -1) catch |err| {
                 c.wl_display_cancel_read(self.display);
                 std.debug.print("poll error: {}\n", .{err});
@@ -317,8 +332,17 @@ pub const App = struct {
                 }
             }
 
-            // Handle incoming IPC command (fds[2]).
-            if (nfds == 3 and fds[2].revents & linux.POLL.IN != 0) {
+            // Handle SIGTERM (fds[2]): drain the signalfd and begin clean shutdown.
+            if (fds[2].revents & linux.POLL.IN != 0) {
+                // signalfd_siginfo is 128 bytes; drain it so the fd doesn't stay readable.
+                var sig_info: [128]u8 = undefined;
+                _ = posix.read(self.sig_fd, &sig_info) catch {};
+                std.debug.print("received SIGTERM, shutting down\n", .{});
+                self.running = false;
+            }
+
+            // Handle incoming IPC command (fds[3]).
+            if (nfds == 4 and fds[3].revents & linux.POLL.IN != 0) {
                 self.handleIpcEvent();
             }
         }
@@ -502,6 +526,7 @@ pub const App = struct {
         self.ipc_server = null;
         self.allocator.free(self.palettes);
         posix.close(self.tfd);
+        posix.close(self.sig_fd);
 
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
