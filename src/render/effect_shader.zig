@@ -10,6 +10,11 @@ const FrondHazeShader = @import("frond_haze_shader.zig").FrondHazeShader;
 const LumenTunnelShader = @import("lumen_tunnel_shader.zig").LumenTunnelShader;
 const VelvetMeshShader = @import("velvet_mesh_shader.zig").VelvetMeshShader;
 const StarfieldFogShader = @import("starfield_fog_shader.zig").StarfieldFogShader;
+const GyroEchoShader = @import("gyro_echo_shader.zig").GyroEchoShader;
+const HexFloretShader = @import("hex_floret_shader.zig").HexFloretShader;
+const DitherOrbShader = @import("dither_orb_shader.zig").DitherOrbShader;
+const SignalMatrixShader = @import("signal_matrix_shader.zig").SignalMatrixShader;
+const FractLatticeShader = @import("fract_lattice_shader.zig").FractLatticeShader;
 
 /// GPU pipeline abstraction. App owns one ?EffectShader (null when GPU
 /// unavailable). SurfaceState receives a const pointer per renderTick call.
@@ -22,6 +27,11 @@ pub const EffectShader = union(EffectType) {
     lumen_tunnel: LumenTunnelShader,
     velvet_mesh: VelvetMeshShader,
     starfield_fog: StarfieldFogShader,
+    gyro_echo: GyroEchoShader,
+    hex_floret: HexFloretShader,
+    dither_orb: DitherOrbShader,
+    signal_matrix: SignalMatrixShader,
+    fract_lattice: FractLatticeShader,
 
     /// Compile and link the appropriate shader program for the given Effect.
     pub fn init(effect: *const Effect) !EffectShader {
@@ -32,6 +42,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => EffectShader{ .lumen_tunnel = try LumenTunnelShader.init() },
             .velvet_mesh => EffectShader{ .velvet_mesh = try VelvetMeshShader.init() },
             .starfield_fog => EffectShader{ .starfield_fog = try StarfieldFogShader.init() },
+            .gyro_echo => EffectShader{ .gyro_echo = try GyroEchoShader.init() },
+            .hex_floret => EffectShader{ .hex_floret = try HexFloretShader.init() },
+            .dither_orb => EffectShader{ .dither_orb = try DitherOrbShader.init() },
+            .signal_matrix => EffectShader{ .signal_matrix = try SignalMatrixShader.init() },
+            .fract_lattice => EffectShader{ .fract_lattice = try FractLatticeShader.init() },
         };
     }
 
@@ -61,6 +76,26 @@ pub const EffectShader = union(EffectType) {
                 sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
             },
             .starfield_fog => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .gyro_echo => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .hex_floret => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .dither_orb => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .signal_matrix => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .fract_lattice => |*sh| {
                 std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
                 sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
             },
@@ -97,6 +132,26 @@ pub const EffectShader = union(EffectType) {
                 std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
                 sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
             },
+            .gyro_echo => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .hex_floret => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .dither_orb => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .signal_matrix => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
+            .fract_lattice => |*sh| {
+                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
+                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+            },
         }
     }
 
@@ -116,6 +171,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
             .velvet_mesh => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
             .starfield_fog => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .gyro_echo => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .hex_floret => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .dither_orb => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .signal_matrix => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .fract_lattice => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
         }
     }
 
@@ -128,6 +188,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.draw(),
             .velvet_mesh => |*sh| sh.draw(),
             .starfield_fog => |*sh| sh.draw(),
+            .gyro_echo => |*sh| sh.draw(),
+            .hex_floret => |*sh| sh.draw(),
+            .dither_orb => |*sh| sh.draw(),
+            .signal_matrix => |*sh| sh.draw(),
+            .fract_lattice => |*sh| sh.draw(),
         }
     }
 
@@ -140,6 +205,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.inner.program,
             .velvet_mesh => |*sh| sh.inner.program,
             .starfield_fog => |*sh| sh.inner.program,
+            .gyro_echo => |*sh| sh.inner.program,
+            .hex_floret => |*sh| sh.inner.program,
+            .dither_orb => |*sh| sh.inner.program,
+            .signal_matrix => |*sh| sh.inner.program,
+            .fract_lattice => |*sh| sh.inner.program,
         };
     }
 
@@ -152,6 +222,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.inner.vbo,
             .velvet_mesh => |*sh| sh.inner.vbo,
             .starfield_fog => |*sh| sh.inner.vbo,
+            .gyro_echo => |*sh| sh.inner.vbo,
+            .hex_floret => |*sh| sh.inner.vbo,
+            .dither_orb => |*sh| sh.inner.vbo,
+            .signal_matrix => |*sh| sh.inner.vbo,
+            .fract_lattice => |*sh| sh.inner.vbo,
         };
     }
 
@@ -164,6 +239,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.inner.a_pos_loc,
             .velvet_mesh => |*sh| sh.inner.a_pos_loc,
             .starfield_fog => |*sh| sh.inner.a_pos_loc,
+            .gyro_echo => |*sh| sh.inner.a_pos_loc,
+            .hex_floret => |*sh| sh.inner.a_pos_loc,
+            .dither_orb => |*sh| sh.inner.a_pos_loc,
+            .signal_matrix => |*sh| sh.inner.a_pos_loc,
+            .fract_lattice => |*sh| sh.inner.a_pos_loc,
         };
     }
 
@@ -175,6 +255,11 @@ pub const EffectShader = union(EffectType) {
             .lumen_tunnel => |*sh| sh.deinit(),
             .velvet_mesh => |*sh| sh.deinit(),
             .starfield_fog => |*sh| sh.deinit(),
+            .gyro_echo => |*sh| sh.deinit(),
+            .hex_floret => |*sh| sh.deinit(),
+            .dither_orb => |*sh| sh.deinit(),
+            .signal_matrix => |*sh| sh.deinit(),
+            .fract_lattice => |*sh| sh.deinit(),
         }
     }
 };

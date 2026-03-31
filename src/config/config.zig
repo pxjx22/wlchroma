@@ -34,6 +34,11 @@ pub const EffectType = enum {
     lumen_tunnel,
     velvet_mesh,
     starfield_fog,
+    gyro_echo,
+    hex_floret,
+    dither_orb,
+    signal_matrix,
+    fract_lattice,
 };
 
 pub const AppConfig = struct {
@@ -101,7 +106,7 @@ fn loadConfigFullFromDefaults(allocator: std.mem.Allocator) !LoadResult {
             error.OutOfMemory => return err,
             else => {
                 std.debug.print("config: could not resolve config path, using defaults\n", .{});
-                return LoadResult{ .config = defaultConfig(), .palettes = &.{} };
+                return LoadResult{ .config = defaultConfig(), .palettes = try allocator.alloc(NamedPalette, 0) };
             },
         }
     };
@@ -111,7 +116,7 @@ fn loadConfigFullFromDefaults(allocator: std.mem.Allocator) !LoadResult {
         switch (err) {
             error.FileNotFound => {
                 std.debug.print("config: no config file found at {s}, using defaults\n", .{path.slice});
-                return LoadResult{ .config = defaultConfig(), .palettes = &.{} };
+                return LoadResult{ .config = defaultConfig(), .palettes = try allocator.alloc(NamedPalette, 0) };
             },
             else => {
                 std.debug.print("config: failed to open {s}: {}\n", .{ path.slice, err });
@@ -805,6 +810,38 @@ test "parseAndValidate version 2 accepted" {
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
+test "parseAndValidateFull collects named palettes" {
+    const allocator = std.testing.allocator;
+    const toml =
+        "version = 2\n" ++
+        "[[palettes]]\n" ++
+        "name = \"ocean\"\n" ++
+        "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n";
+
+    const result = try parseAndValidateExistingConfigFull(allocator, toml);
+    defer allocator.free(result.palettes);
+
+    try std.testing.expectEqual(@as(usize, 1), result.palettes.len);
+    try std.testing.expectEqualStrings("ocean", result.palettes[0].nameSlice());
+    try std.testing.expectEqual(@as(u8, 0x00), result.palettes[0].colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xb4), result.palettes[0].colors[1].g);
+    try std.testing.expectEqual(@as(u8, 0xef), result.palettes[0].colors[2].b);
+}
+
+test "parseAndValidateFull rejects duplicate palette names" {
+    const allocator = std.testing.allocator;
+    const toml =
+        "version = 2\n" ++
+        "[[palettes]]\n" ++
+        "name = \"ocean\"\n" ++
+        "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n" ++
+        "[[palettes]]\n" ++
+        "name = \"ocean\"\n" ++
+        "colors = [\"#88c0d0\", \"#81a1c1\", \"#5e81ac\"]\n";
+
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfigFull(allocator, toml));
+}
+
 test "parseAndValidate existing config requires version" {
     const toml = "fps = 15\n";
     try std.testing.expectError(error.UnsupportedVersion, parseAndValidateExistingConfig(toml));
@@ -1003,6 +1040,36 @@ test "parseAndValidate colormix effect explicit" {
     const toml = "[effect]\nname = \"colormix\"\n";
     const cfg = try parseAndValidate(toml);
     try std.testing.expectEqual(EffectType.colormix, cfg.effect_type);
+}
+
+test "parseAndValidate gyro_echo effect" {
+    const toml = "[effect]\nname = \"gyro_echo\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.gyro_echo, cfg.effect_type);
+}
+
+test "parseAndValidate hex_floret effect" {
+    const toml = "[effect]\nname = \"hex_floret\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.hex_floret, cfg.effect_type);
+}
+
+test "parseAndValidate dither_orb effect" {
+    const toml = "[effect]\nname = \"dither_orb\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.dither_orb, cfg.effect_type);
+}
+
+test "parseAndValidate signal_matrix effect" {
+    const toml = "[effect]\nname = \"signal_matrix\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.signal_matrix, cfg.effect_type);
+}
+
+test "parseAndValidate fract_lattice effect" {
+    const toml = "[effect]\nname = \"fract_lattice\"\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(EffectType.fract_lattice, cfg.effect_type);
 }
 
 test "parseAndValidate speed valid min" {

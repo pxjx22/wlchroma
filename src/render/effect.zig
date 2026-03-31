@@ -7,6 +7,11 @@ const FrondHazeRenderer = @import("frond_haze.zig").FrondHazeRenderer;
 const LumenTunnelRenderer = @import("lumen_tunnel.zig").LumenTunnelRenderer;
 const VelvetMeshRenderer = @import("velvet_mesh.zig").VelvetMeshRenderer;
 const StarfieldFogRenderer = @import("starfield_fog.zig").StarfieldFogRenderer;
+const GyroEchoRenderer = @import("gyro_echo.zig").GyroEchoRenderer;
+const HexFloretRenderer = @import("hex_floret.zig").HexFloretRenderer;
+const DitherOrbRenderer = @import("dither_orb.zig").DitherOrbRenderer;
+const SignalMatrixRenderer = @import("signal_matrix.zig").SignalMatrixRenderer;
+const FractLatticeRenderer = @import("fract_lattice.zig").FractLatticeRenderer;
 const Rgb = @import("../config/defaults.zig").Rgb;
 
 /// Central effect abstraction. App owns one Effect value; SurfaceState holds
@@ -19,6 +24,11 @@ pub const Effect = union(EffectType) {
     lumen_tunnel: LumenTunnelRenderer,
     velvet_mesh: VelvetMeshRenderer,
     starfield_fog: StarfieldFogRenderer,
+    gyro_echo: GyroEchoRenderer,
+    hex_floret: HexFloretRenderer,
+    dither_orb: DitherOrbRenderer,
+    signal_matrix: SignalMatrixRenderer,
+    fract_lattice: FractLatticeRenderer,
 
     /// Construct from config. The caller (App.init) is responsible for
     /// applying the GPU-only fallback before calling Effect.init.
@@ -40,6 +50,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => Effect{ .lumen_tunnel = LumenTunnelRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
             .velvet_mesh => Effect{ .velvet_mesh = VelvetMeshRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
             .starfield_fog => Effect{ .starfield_fog = StarfieldFogRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
+            .gyro_echo => Effect{ .gyro_echo = GyroEchoRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
+            .hex_floret => Effect{ .hex_floret = HexFloretRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
+            .dither_orb => Effect{ .dither_orb = DitherOrbRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
+            .signal_matrix => Effect{ .signal_matrix = SignalMatrixRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
+            .fract_lattice => Effect{ .fract_lattice = FractLatticeRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
         };
     }
 
@@ -52,6 +67,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.maybeAdvance(time_ms),
             .velvet_mesh => |*r| r.maybeAdvance(time_ms),
             .starfield_fog => |*r| r.maybeAdvance(time_ms),
+            .gyro_echo => |*r| r.maybeAdvance(time_ms),
+            .hex_floret => |*r| r.maybeAdvance(time_ms),
+            .dither_orb => |*r| r.maybeAdvance(time_ms),
+            .signal_matrix => |*r| r.maybeAdvance(time_ms),
+            .fract_lattice => |*r| r.maybeAdvance(time_ms),
         }
     }
 
@@ -64,6 +84,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.frames,
             .velvet_mesh => |*r| r.frames,
             .starfield_fog => |*r| r.frames,
+            .gyro_echo => |*r| r.frames,
+            .hex_floret => |*r| r.frames,
+            .dither_orb => |*r| r.frames,
+            .signal_matrix => |*r| r.frames,
+            .fract_lattice => |*r| r.frames,
         };
     }
 
@@ -76,6 +101,27 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.speed,
             .velvet_mesh => |*r| r.speed,
             .starfield_fog => |*r| r.speed,
+            .gyro_echo => |*r| r.speed,
+            .hex_floret => |*r| r.speed,
+            .dither_orb => |*r| r.speed,
+            .signal_matrix => |*r| r.speed,
+            .fract_lattice => |*r| r.speed,
+        };
+    }
+
+    pub fn frameAdvanceMs(self: *const Effect) u32 {
+        return switch (self.*) {
+            .colormix => |*r| r.frame_advance_ms,
+            .glass_drift => |*r| r.frame_advance_ms,
+            .frond_haze => |*r| r.frame_advance_ms,
+            .lumen_tunnel => |*r| r.frame_advance_ms,
+            .velvet_mesh => |*r| r.frame_advance_ms,
+            .starfield_fog => |*r| r.frame_advance_ms,
+            .gyro_echo => |*r| r.frame_advance_ms,
+            .hex_floret => |*r| r.frame_advance_ms,
+            .dither_orb => |*r| r.frame_advance_ms,
+            .signal_matrix => |*r| r.frame_advance_ms,
+            .fract_lattice => |*r| r.frame_advance_ms,
         };
     }
 
@@ -89,6 +135,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => true,
             .velvet_mesh => true,
             .starfield_fog => true,
+            .gyro_echo => true,
+            .hex_floret => true,
+            .dither_orb => true,
+            .signal_matrix => true,
+            .fract_lattice => true,
         };
     }
 
@@ -102,6 +153,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => {},
             .velvet_mesh => {},
             .starfield_fog => {},
+            .gyro_echo => {},
+            .hex_floret => {},
+            .dither_orb => {},
+            .signal_matrix => {},
+            .fract_lattice => {},
         }
     }
 
@@ -114,6 +170,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => null,
             .velvet_mesh => null,
             .starfield_fog => null,
+            .gyro_echo => null,
+            .hex_floret => null,
+            .dither_orb => null,
+            .signal_matrix => null,
+            .fract_lattice => null,
         };
     }
 
@@ -126,6 +187,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => null,
             .velvet_mesh => null,
             .starfield_fog => null,
+            .gyro_echo => null,
+            .hex_floret => null,
+            .dither_orb => null,
+            .signal_matrix => null,
+            .fract_lattice => null,
         };
     }
 
@@ -138,6 +204,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.phase_offset,
             .velvet_mesh => |*r| r.phase_offset,
             .starfield_fog => |*r| r.phase_offset,
+            .gyro_echo => |*r| r.phase_offset,
+            .hex_floret => |*r| r.phase_offset,
+            .dither_orb => |*r| r.phase_offset,
+            .signal_matrix => |*r| r.phase_offset,
+            .fract_lattice => |*r| r.phase_offset,
         };
     }
 
@@ -158,6 +229,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.palette = colors,
             .velvet_mesh => |*r| r.palette = colors,
             .starfield_fog => |*r| r.palette = colors,
+            .gyro_echo => |*r| r.palette = colors,
+            .hex_floret => |*r| r.palette = colors,
+            .dither_orb => |*r| r.palette = colors,
+            .signal_matrix => |*r| r.palette = colors,
+            .fract_lattice => |*r| r.palette = colors,
         }
     }
 
@@ -170,6 +246,11 @@ pub const Effect = union(EffectType) {
             .lumen_tunnel => |*r| r.palette,
             .velvet_mesh => |*r| r.palette,
             .starfield_fog => |*r| r.palette,
+            .gyro_echo => |*r| r.palette,
+            .hex_floret => |*r| r.palette,
+            .dither_orb => |*r| r.palette,
+            .signal_matrix => |*r| r.palette,
+            .fract_lattice => |*r| r.palette,
         };
     }
 };
