@@ -401,8 +401,8 @@ pub const App = struct {
     }
 
     fn handleStop(self: *App, client_fd: posix.fd_t) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
+        dispatch.writeOk(client_fd);
+        self.running = false;
     }
 
     fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
