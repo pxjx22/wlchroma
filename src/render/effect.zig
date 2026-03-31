@@ -141,6 +141,26 @@ pub const Effect = union(EffectType) {
         };
     }
 
+    /// Update the palette colors in-place without changing the effect type.
+    /// For colormix: rebuilds the 12-cell palette and pre-computed GPU data.
+    /// For GPU effects: updates the [3]Rgb palette field.
+    /// Call effect_shader.bind(&effect) after this to re-upload to the GPU.
+    pub fn updatePalette(self: *Effect, colors: [3]Rgb) void {
+        const palette_mod = @import("palette.zig");
+        const ColormixShader = @import("colormix_shader.zig").ColormixShader;
+        switch (self.*) {
+            .colormix => |*r| {
+                r.palette = palette_mod.buildPalette(colors[0], colors[1], colors[2]);
+                r.palette_data = ColormixShader.buildPaletteData(&r.palette);
+            },
+            .glass_drift => |*r| r.palette = colors,
+            .frond_haze => |*r| r.palette = colors,
+            .lumen_tunnel => |*r| r.palette = colors,
+            .velvet_mesh => |*r| r.palette = colors,
+            .starfield_fog => |*r| r.palette = colors,
+        }
+    }
+
     /// GPU effect palette for bind/setStaticUniforms. Null for CPU-only effects.
     pub fn gpuPalette(self: *const Effect) ?[3]Rgb {
         return switch (self.*) {

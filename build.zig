@@ -62,10 +62,48 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the wallpaper daemon");
     run_step.dependOn(&run_cmd.step);
 
+    // --- wlchroma-ctl (IPC client) ---
+    const ctl_mod = b.createModule(.{
+        .root_source_file = b.path("src/ctl/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ctl_exe = b.addExecutable(.{
+        .name = "wlchroma-ctl",
+        .root_module = ctl_mod,
+    });
+    b.installArtifact(ctl_exe);
+
     const unit_tests = b.addTest(.{
         .root_module = mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // IPC protocol tests
+    const ipc_dispatch_mod = b.createModule(.{
+        .root_source_file = b.path("src/ipc/dispatch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // dispatch depends on server for IpcServer.writeLine
+    const ipc_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/ipc/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_dispatch_mod.addImport("server", ipc_server_mod);
+
+    const ipc_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/protocol_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_test_mod.addImport("dispatch", ipc_dispatch_mod);
+    const ipc_tests = b.addTest(.{
+        .root_module = ipc_test_mod,
+    });
+    const run_ipc_tests = b.addRunArtifact(ipc_tests);
+    test_step.dependOn(&run_ipc_tests.step);
 }

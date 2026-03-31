@@ -7,6 +7,26 @@ pub const UpscaleFilter = enum {
     linear,
 };
 
+/// A named palette entry loaded from the config's [[palettes]] table.
+/// The name is stored in a fixed-size buffer to avoid heap lifetime issues.
+pub const NamedPalette = struct {
+    name: [64:0]u8,
+    name_len: usize,
+    colors: [3]Rgb,
+
+    pub fn nameSlice(self: *const NamedPalette) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
+/// Full result of loading a config file: the parsed AppConfig plus a
+/// heap-allocated slice of named palettes (may be empty). The caller owns
+/// the palettes slice and must free it with the same allocator.
+pub const LoadResult = struct {
+    config: AppConfig,
+    palettes: []NamedPalette,
+};
+
 pub const EffectType = enum {
     colormix,
     glass_drift,
@@ -42,14 +62,23 @@ pub fn defaultConfig() AppConfig {
 
 const DEFAULT_FPS: u32 = 15;
 
-pub fn loadConfig(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !AppConfig {
+/// Load config and return both AppConfig and named palettes.
+/// The returned palettes slice is heap-allocated; caller must free it.
+pub fn loadConfigFull(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !LoadResult {
     if (explicit_path) |ep| {
-        return loadConfigFromExplicitPath(allocator, ep);
+        return loadConfigFullFromExplicitPath(allocator, ep);
     }
-    return loadConfigFromDefaults(allocator);
+    return loadConfigFullFromDefaults(allocator);
 }
 
-fn loadConfigFromExplicitPath(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
+/// Legacy entry point (no palettes). Still used by existing tests.
+pub fn loadConfig(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !AppConfig {
+    const result = try loadConfigFull(allocator, explicit_path);
+    allocator.free(result.palettes);
+    return result.config;
+}
+
+fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, path: []const u8) !LoadResult {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         std.debug.print("config: failed to open {s}: {}\n", .{ path, err });
         return error.ConfigFileError;
@@ -63,16 +92,16 @@ fn loadConfigFromExplicitPath(allocator: std.mem.Allocator, path: []const u8) !A
     };
     defer allocator.free(content);
 
-    return parseAndValidateExistingConfig(content);
+    return parseAndValidateExistingConfigFull(allocator, content);
 }
 
-fn loadConfigFromDefaults(allocator: std.mem.Allocator) !AppConfig {
+fn loadConfigFullFromDefaults(allocator: std.mem.Allocator) !LoadResult {
     const path = resolveConfigPath(allocator) catch |err| {
         switch (err) {
             error.OutOfMemory => return err,
             else => {
                 std.debug.print("config: could not resolve config path, using defaults\n", .{});
-                return defaultConfig();
+                return LoadResult{ .config = defaultConfig(), .palettes = &.{} };
             },
         }
     };
@@ -82,7 +111,7 @@ fn loadConfigFromDefaults(allocator: std.mem.Allocator) !AppConfig {
         switch (err) {
             error.FileNotFound => {
                 std.debug.print("config: no config file found at {s}, using defaults\n", .{path.slice});
-                return defaultConfig();
+                return LoadResult{ .config = defaultConfig(), .palettes = &.{} };
             },
             else => {
                 std.debug.print("config: failed to open {s}: {}\n", .{ path.slice, err });
@@ -92,14 +121,14 @@ fn loadConfigFromDefaults(allocator: std.mem.Allocator) !AppConfig {
     };
     defer file.close();
 
-    const max_size = 64 * 1024; // 64 KiB ought to be enough for a config file
+    const max_size = 64 * 1024;
     const content = file.readToEndAlloc(allocator, max_size) catch |err| {
         std.debug.print("config: failed to read config file: {}\n", .{err});
         return error.ConfigFileError;
     };
     defer allocator.free(content);
 
-    return parseAndValidateExistingConfig(content);
+    return parseAndValidateExistingConfigFull(allocator, content);
 }
 
 const ConfigPath = struct {
@@ -181,6 +210,10 @@ fn parseAndValidateExistingConfig(content: []const u8) !AppConfig {
     return parseAndValidateWithOptions(content, .{ .require_version = true });
 }
 
+fn parseAndValidateExistingConfigFull(allocator: std.mem.Allocator, content: []const u8) !LoadResult {
+    return parseAndValidateFullWithOptions(allocator, content, .{ .require_version = true });
+}
+
 fn parseAndValidate(content: []const u8) !AppConfig {
     return parseAndValidateWithOptions(content, .{});
 }
@@ -254,8 +287,8 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                         std.debug.print("config: line {}: 'version' must be an integer\n", .{line_num});
                         return error.InvalidValue;
                     };
-                    if (v != 1) {
-                        std.debug.print("config: unsupported config version {}, expected 1\n", .{v});
+                    if (v != 1 and v != 2) {
+                        std.debug.print("config: unsupported config version {}, expected 1 or 2\n", .{v});
                         return error.UnsupportedVersion;
                     }
                 } else if (std.mem.eql(u8, kv.key, "fps")) {
@@ -373,6 +406,10 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                     std.debug.print("config: line {}: ignoring unknown key 'renderer.{s}'\n", .{ line_num, kv.key });
                 }
             },
+            .palettes_entry => {
+                // Palette entries are parsed in parseAndValidateFullWithOptions.
+                // The plain (non-full) parser ignores them.
+            },
             .unknown => {
                 // Ignore keys in unknown sections
             },
@@ -387,12 +424,139 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
     return config;
 }
 
+/// Like parseAndValidateWithOptions but also collects [[palettes]] entries.
+/// The returned palettes slice is heap-allocated; caller must free it.
+fn parseAndValidateFullWithOptions(allocator: std.mem.Allocator, content: []const u8, options: ParseOptions) !LoadResult {
+    // Parse the base config using the existing logic.
+    const config = try parseAndValidateWithOptions(content, options);
+
+    // Second pass: collect [[palettes]] entries.
+    const MAX_PALETTES = 64;
+    var palette_buf: [MAX_PALETTES]NamedPalette = undefined;
+    var palette_count: usize = 0;
+
+    var in_palette = false;
+    var cur_has_name = false;
+    var cur_has_colors = false;
+    var cur: NamedPalette = undefined;
+    var seen_palette_names = SeenNames{ .buf = undefined, .len = 0 };
+    var line_num: usize = 0;
+
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |raw_line| {
+        line_num += 1;
+        const line = stripComment(std.mem.trim(u8, raw_line, &std.ascii.whitespace));
+        if (line.len == 0) continue;
+
+        if (line[0] == '[') {
+            // Flush any complete in-progress palette entry.
+            if (in_palette) {
+                if (!cur_has_name or !cur_has_colors) {
+                    std.debug.print("config: [[palettes]] entry before line {} is missing name or colors\n", .{line_num});
+                    return error.MalformedConfig;
+                }
+                if (palette_count >= MAX_PALETTES) return error.MalformedConfig;
+                palette_buf[palette_count] = cur;
+                palette_count += 1;
+                in_palette = false;
+                cur_has_name = false;
+                cur_has_colors = false;
+            }
+
+            const parsed = parseSectionHeader(line) orelse continue;
+            if (parsed.section == .palettes_entry) {
+                if (palette_count >= MAX_PALETTES) {
+                    std.debug.print("config: too many [[palettes]] entries (max {})\n", .{MAX_PALETTES});
+                    return error.MalformedConfig;
+                }
+                in_palette = true;
+                cur = std.mem.zeroes(NamedPalette);
+            } else {
+                in_palette = false;
+            }
+            continue;
+        }
+
+        if (!in_palette) continue;
+
+        const kv = parseKeyValue(line) orelse {
+            std.debug.print("config: line {}: malformed key-value in [[palettes]]\n", .{line_num});
+            return error.MalformedConfig;
+        };
+
+        if (std.mem.eql(u8, kv.key, "name")) {
+            if (cur_has_name) {
+                std.debug.print("config: line {}: duplicate 'name' in [[palettes]] entry\n", .{line_num});
+                return error.DuplicateConfigEntry;
+            }
+            const s = parseQuotedString(kv.value) orelse {
+                std.debug.print("config: line {}: [[palettes]] name must be a quoted string\n", .{line_num});
+                return error.InvalidValue;
+            };
+            if (s.len == 0 or s.len > 63) {
+                std.debug.print("config: line {}: [[palettes]] name must be 1–63 characters\n", .{line_num});
+                return error.InvalidValue;
+            }
+            // Check for duplicate palette names.
+            seen_palette_names.add(s) catch |err| switch (err) {
+                error.DuplicateConfigEntry => {
+                    std.debug.print("config: line {}: duplicate palette name \"{s}\"\n", .{ line_num, s });
+                    return error.DuplicateConfigEntry;
+                },
+                else => return err,
+            };
+            cur.name = std.mem.zeroes([64:0]u8);
+            @memcpy(cur.name[0..s.len], s);
+            cur.name_len = s.len;
+            cur_has_name = true;
+        } else if (std.mem.eql(u8, kv.key, "colors")) {
+            if (cur_has_colors) {
+                std.debug.print("config: line {}: duplicate 'colors' in [[palettes]] entry\n", .{line_num});
+                return error.DuplicateConfigEntry;
+            }
+            const arr = parseStringArray(kv.value) orelse {
+                std.debug.print("config: line {}: [[palettes]] colors must be an array of 3 '#RRGGBB' strings\n", .{line_num});
+                return error.InvalidValue;
+            };
+            if (arr.len != 3) {
+                std.debug.print("config: line {}: [[palettes]] colors must have exactly 3 entries, got {}\n", .{ line_num, arr.len });
+                return error.InvalidValue;
+            }
+            for (arr.items(), 0..) |color_str, i| {
+                cur.colors[i] = parseHexColor(color_str) orelse {
+                    std.debug.print("config: line {}: [[palettes]] color {} must be '#RRGGBB', got \"{s}\"\n", .{ line_num, i + 1, color_str });
+                    return error.InvalidValue;
+                };
+            }
+            cur_has_colors = true;
+        } else {
+            std.debug.print("config: line {}: ignoring unknown key 'palettes.{s}'\n", .{ line_num, kv.key });
+        }
+    }
+
+    // Flush the last in-progress entry.
+    if (in_palette) {
+        if (!cur_has_name or !cur_has_colors) {
+            std.debug.print("config: [[palettes]] entry at end of file is missing name or colors\n", .{});
+            return error.MalformedConfig;
+        }
+        if (palette_count >= MAX_PALETTES) return error.MalformedConfig;
+        palette_buf[palette_count] = cur;
+        palette_count += 1;
+    }
+
+    // Copy results to heap-allocated slice.
+    const palettes = try allocator.dupe(NamedPalette, palette_buf[0..palette_count]);
+    return LoadResult{ .config = config, .palettes = palettes };
+}
+
 const Section = enum {
     top,
     outputs,
     effect,
     effect_settings,
     renderer,
+    palettes_entry, // inside a [[palettes]] array-of-tables entry
     unknown,
 };
 
@@ -402,7 +566,8 @@ const ParsedSection = struct {
 };
 
 fn shouldTrackSection(section: Section) bool {
-    return section != .unknown;
+    // palettes_entry appears multiple times by design (array-of-tables); don't dedup-track it.
+    return section != .unknown and section != .palettes_entry;
 }
 
 fn shouldTrackKey(section: Section, key: []const u8) bool {
@@ -412,13 +577,25 @@ fn shouldTrackKey(section: Section, key: []const u8) bool {
         .effect => std.mem.eql(u8, key, "name"),
         .effect_settings => std.mem.eql(u8, key, "palette") or std.mem.eql(u8, key, "speed"),
         .renderer => std.mem.eql(u8, key, "scale") or std.mem.eql(u8, key, "upscale_filter"),
-        .unknown => false,
+        // palettes_entry keys are tracked per-entry in parseAndValidateFullWithOptions.
+        .palettes_entry, .unknown => false,
     };
 }
 
 fn parseSectionHeader(line: []const u8) ?ParsedSection {
     if (line.len < 2 or line[0] != '[') return null;
-    // Find closing bracket
+
+    // Detect [[name]] (TOML array-of-tables).
+    if (line.len >= 4 and line[1] == '[') {
+        const close2 = std.mem.indexOf(u8, line, "]]") orelse return null;
+        if (close2 < 3) return null;
+        if (std.mem.trim(u8, line[close2 + 2 ..], &std.ascii.whitespace).len != 0) return null;
+        const name = std.mem.trim(u8, line[2..close2], &std.ascii.whitespace);
+        if (std.mem.eql(u8, name, "palettes")) return .{ .section = .palettes_entry, .name = name };
+        return .{ .section = .unknown, .name = name };
+    }
+
+    // Single-bracket [name].
     const close = std.mem.indexOfScalar(u8, line, ']') orelse return null;
     if (close < 2) return null;
     if (std.mem.trim(u8, line[close + 1 ..], &std.ascii.whitespace).len != 0) return null;
@@ -618,8 +795,14 @@ test "parseAndValidate full config" {
 }
 
 test "parseAndValidate bad version" {
-    const toml = "version = 2\n";
+    const toml = "version = 3\n";
     try std.testing.expectError(error.UnsupportedVersion, parseAndValidate(toml));
+}
+
+test "parseAndValidate version 2 accepted" {
+    const toml = "version = 2\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
 test "parseAndValidate existing config requires version" {

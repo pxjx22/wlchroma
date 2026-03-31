@@ -99,7 +99,7 @@ systemctl --user enable --now wlchroma.service
 1. `$XDG_CONFIG_HOME/wlchroma/config.toml`
 2. `$HOME/.config/wlchroma/config.toml`
 
-If no config file exists, built-in defaults are used. If a config file does exist, it must include `version = 1`.
+If no config file exists, built-in defaults are used. If a config file does exist, it must include `version = 1` (or `version = 2` for named-palette support — see below).
 
 The public v1 config surface is:
 
@@ -121,7 +121,7 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 ### Config Notes
 
 - `fps` defaults to `15`. That is an intentional low-power default for the wallpaper animation; it is not tied to your monitor refresh rate.
-- Config is loaded once at startup. There is no live config reload yet, so after changing `config.toml` you must restart `wlchroma`.
+- Config is loaded once at startup. Use `wlchroma-ctl reload` to apply changes without restarting (see [Runtime Control](#runtime-control)).
 - `renderer.scale = 1.0` renders at native resolution. Lower values render to a smaller offscreen image and then scale it up, which usually reduces GPU work but makes the result look softer or chunkier.
 - `renderer.scale` must be between `0.1` and `1.0`. Values from `0.95` up to but not including `1.0` are rejected.
 - `renderer.upscale_filter = "nearest"` keeps the upscaled image crisp and blocky. `"linear"` smooths it out, but can look blurrier.
@@ -145,6 +145,77 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 
 All GPU effects require EGL. If EGL is unavailable, `wlchroma` falls back to `colormix` automatically and logs a warning.
 - `[effect.settings].speed` scales animation velocity for whichever effect is active. Valid range: `0.25`–`2.5`. Defaults to `1.0`. Out-of-range values exit at startup with a clear error.
+
+### Config v2: Named Palettes
+
+Set `version = 2` to define named color palettes that can be switched at runtime via `wlchroma-ctl set-palette`.
+
+```toml
+version = 2
+fps = 30
+
+[effect]
+name = "velvet_mesh"
+
+[effect.settings]
+palette = ["#e63946", "#457b9d", "#1d3557"]
+
+[[palettes]]
+name = "ocean"
+colors = ["#0077b6", "#00b4d8", "#90e0ef"]
+
+[[palettes]]
+name = "nord"
+colors = ["#88c0d0", "#81a1c1", "#5e81ac"]
+```
+
+Palette names must be unique within the file. The initial effect colors come from `[effect.settings].palette`; named palettes are only activated via IPC.
+
+## Runtime Control
+
+`wlchroma` exposes a Unix domain socket at `$XDG_RUNTIME_DIR/wlchroma.sock` using a simple line-based protocol.
+
+### wlchroma-ctl
+
+Install `wlchroma-ctl` alongside `wlchroma` (same `zig build` step):
+
+```bash
+zig build install
+# both binaries land in zig-out/bin/
+```
+
+Available commands:
+
+| Command | Description |
+|---|---|
+| `wlchroma-ctl query` | Print current effect, fps, scale, and active palette |
+| `wlchroma-ctl set-fps <1-240>` | Change animation frame rate |
+| `wlchroma-ctl set-scale <0.01-4.0>` | Change renderer scale factor |
+| `wlchroma-ctl set-palette <name>` | Switch to a named palette (requires config v2) |
+| `wlchroma-ctl reload` | Re-read config file and apply all changes |
+| `wlchroma-ctl stop` | Gracefully shut down wlchroma |
+
+`wlchroma-ctl` exits 0 on success and 1 on error. Errors are printed to stderr.
+
+### Direct socket access
+
+The protocol is scriptable with standard Unix tools:
+
+```bash
+# query current state
+echo 'query' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
+
+# change fps
+echo 'set-fps 60' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
+
+# switch palette (config v2 required)
+echo 'set-palette ocean' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
+
+# or with nc (some implementations)
+echo 'reload' | nc -U "$XDG_RUNTIME_DIR/wlchroma.sock"
+```
+
+All responses are newline-terminated. Multi-line responses (such as `query`) end with `ok`. Error responses start with `error:`.
 
 ## Limitations
 

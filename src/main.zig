@@ -9,12 +9,15 @@ pub fn main() !void {
 
     const config_path = parseArgs();
 
-    const config = config_mod.loadConfig(allocator, config_path) catch |err| {
+    const load_result = config_mod.loadConfigFull(allocator, config_path) catch |err| {
         std.debug.print("fatal: failed to load config: {}\n", .{err});
         return err;
     };
 
-    var app = try App.init(allocator, config);
+    var app = App.init(allocator, load_result.config, load_result.palettes, config_path) catch |err| {
+        allocator.free(load_result.palettes);
+        return err;
+    };
     defer app.deinit();
     try app.run();
 }

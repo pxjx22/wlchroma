@@ -14,7 +14,11 @@ const EffectShader = @import("render/effect_shader.zig").EffectShader;
 const defaults = @import("config/defaults.zig");
 const config_mod = @import("config/config.zig");
 const AppConfig = config_mod.AppConfig;
+const NamedPalette = config_mod.NamedPalette;
 const UpscaleFilter = config_mod.UpscaleFilter;
+const server_mod = @import("ipc/server.zig");
+const IpcServer = server_mod.IpcServer;
+const dispatch = @import("ipc/dispatch.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -30,13 +34,44 @@ pub const App = struct {
     frame_interval_ns: u32,
     renderer_scale: f32,
     upscale_filter: UpscaleFilter,
+    // --- IPC fields (T009) ---
+    tfd: posix.fd_t,
+    sig_fd: posix.fd_t,
+    ipc_server: ?IpcServer,
+    /// Config path for reload. Null when wlchroma was started without --config
+    /// and no default config file was found.
+    config_path: ?[]const u8,
+    /// Named palettes loaded from [[palettes]] config table. Owned by App.
+    palettes: []NamedPalette,
+    /// Name of the currently active palette, or zero-length = "custom".
+    active_palette_name_buf: [64]u8,
+    active_palette_name_len: usize,
 
-    pub fn init(allocator: std.mem.Allocator, config: AppConfig) !App {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: AppConfig,
+        palettes: []NamedPalette,
+        config_path: ?[]const u8,
+    ) !App {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
         errdefer c.wl_display_disconnect(display);
 
         // Build effect from config first (before EGL check).
         var effect = Effect.init(&config);
+
+        // Create the timerfd here so it is accessible as a field for set_fps.
+        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer posix.close(tfd);
+
+        // Block SIGTERM and capture it via signalfd so the poll loop handles it
+        // cleanly (triggers deinit, removes socket file). Without this, SIGTERM
+        // kills the process instantly and leaves a stale socket.
+        var sig_mask = posix.sigemptyset();
+        posix.sigaddset(&sig_mask, posix.SIG.TERM);
+        posix.sigprocmask(posix.SIG.BLOCK, &sig_mask, null);
+        const sig_fd_flags: u32 = @bitCast(linux.O{ .NONBLOCK = true, .CLOEXEC = true });
+        const sig_fd = try posix.signalfd(-1, &sig_mask, sig_fd_flags);
+        errdefer posix.close(sig_fd);
 
         var app = App{
             .allocator = allocator,
@@ -52,6 +87,13 @@ pub const App = struct {
             .frame_interval_ns = config.frame_interval_ns,
             .renderer_scale = config.renderer_scale,
             .upscale_filter = config.upscale_filter,
+            .tfd = tfd,
+            .sig_fd = sig_fd,
+            .ipc_server = null,
+            .config_path = config_path,
+            .palettes = palettes,
+            .active_palette_name_buf = std.mem.zeroes([64]u8),
+            .active_palette_name_len = 0,
         };
         errdefer app.registry.deinit();
         errdefer {
@@ -109,6 +151,12 @@ pub const App = struct {
                 std.debug.print("output: {s} {}x{} refresh={}mHz\n", .{ out.name, out.width, out.height, out.refresh_mhz });
             }
         }
+
+        // Start IPC server. Failure is non-fatal (Constitution III: graceful degradation).
+        app.ipc_server = IpcServer.init() catch |err| blk: {
+            std.debug.print("ipc: failed to start IPC server: {} — continuing without IPC\n", .{err});
+            break :blk null;
+        };
 
         return app;
     }
@@ -191,8 +239,8 @@ pub const App = struct {
         }
 
         // --- poll+timerfd main loop ---
-        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
-        defer posix.close(tfd);
+        // tfd was created in App.init and stored as self.tfd.
+        const tfd = self.tfd;
 
         const timer_ns: u32 = self.frame_interval_ns;
         std.debug.print("timer interval: {}ns ({}fps)\n", .{ timer_ns, 1_000_000_000 / @as(u64, timer_ns) });
@@ -204,11 +252,17 @@ pub const App = struct {
         try posix.timerfd_settime(tfd, .{}, &interval, null);
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
+        const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
 
-        var fds = [2]posix.pollfd{
+        // fds[0]=wayland  fds[1]=timerfd  fds[2]=signalfd  fds[3]=ipc (optional)
+        var fds = [4]posix.pollfd{
             .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = self.sig_fd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = ipc_fd, .events = linux.POLL.IN, .revents = 0 },
         };
+        // sig_fd is always active; ipc_fd only when the server started.
+        const nfds: u32 = if (self.ipc_server != null) 4 else 3;
 
         while (self.running) {
             if (c.wl_display_flush(self.display) < 0) {
@@ -224,7 +278,9 @@ pub const App = struct {
 
             fds[0].revents = 0;
             fds[1].revents = 0;
-            _ = posix.poll(&fds, -1) catch |err| {
+            fds[2].revents = 0;
+            fds[3].revents = 0;
+            _ = posix.poll(fds[0..nfds], -1) catch |err| {
                 c.wl_display_cancel_read(self.display);
                 std.debug.print("poll error: {}\n", .{err});
                 break;
@@ -275,10 +331,213 @@ pub const App = struct {
                     self.running = false;
                 }
             }
+
+            // Handle SIGTERM (fds[2]): drain the signalfd and begin clean shutdown.
+            if (fds[2].revents & linux.POLL.IN != 0) {
+                // signalfd_siginfo is 128 bytes; drain it so the fd doesn't stay readable.
+                var sig_info: [128]u8 = undefined;
+                _ = posix.read(self.sig_fd, &sig_info) catch {};
+                std.debug.print("received SIGTERM, shutting down\n", .{});
+                self.running = false;
+            }
+
+            // Handle incoming IPC command (fds[3]).
+            if (nfds == 4 and fds[3].revents & linux.POLL.IN != 0) {
+                self.handleIpcEvent();
+            }
         }
     }
 
+    /// Accept one IPC client connection, read a command line, dispatch it,
+    /// write the response, and close the client fd.
+    fn handleIpcEvent(self: *App) void {
+        var srv = &(self.ipc_server orelse return);
+        const client_fd = srv.accept() catch |err| {
+            std.debug.print("ipc: accept failed: {}\n", .{err});
+            return;
+        };
+        defer posix.close(client_fd);
+
+        var line_buf: [server_mod.LINE_MAX + 1]u8 = undefined;
+        const line = IpcServer.readLine(client_fd, &line_buf) catch |err| {
+            std.debug.print("ipc: readLine failed: {}\n", .{err});
+            return;
+        };
+
+        const cmd = dispatch.parseLine(line) catch |err| switch (err) {
+            error.UnknownCommand => {
+                // Extract verb for the error message.
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                dispatch.writeUnknownCommand(client_fd, verb);
+                return;
+            },
+            error.MissingArgument => {
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                var buf: [96]u8 = undefined;
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "missing argument";
+                dispatch.writeError(client_fd, msg);
+                return;
+            },
+            error.BadArgument => {
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                var buf: [96]u8 = undefined;
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "invalid argument";
+                dispatch.writeError(client_fd, msg);
+                return;
+            },
+        };
+
+        self.dispatchCommand(client_fd, cmd);
+    }
+
+    /// Execute a parsed IpcCommand against the live App state.
+    fn dispatchCommand(self: *App, client_fd: posix.fd_t, cmd: dispatch.IpcCommand) void {
+        switch (cmd) {
+            .query => self.handleQuery(client_fd),
+            .stop => self.handleStop(client_fd),
+            .set_fps => |fps| self.handleSetFps(client_fd, fps),
+            .set_scale => |scale| self.handleSetScale(client_fd, scale),
+            .set_palette => |args| self.handleSetPalette(client_fd, args.nameSlice()),
+            .reload => self.handleReload(client_fd),
+        }
+    }
+
+    // --- IPC command handlers (stubs — filled in per user story phase) ---
+
+    fn handleQuery(self: *App, client_fd: posix.fd_t) void {
+        // effect=<tag name>
+        dispatch.writeKv(client_fd, "effect", @tagName(self.effect));
+
+        // fps=<computed from frame_interval_ns>
+        const fps = 1_000_000_000 / @as(u64, self.frame_interval_ns);
+        var fps_buf: [16]u8 = undefined;
+        const fps_str = std.fmt.bufPrint(&fps_buf, "{}", .{fps}) catch "?";
+        dispatch.writeKv(client_fd, "fps", fps_str);
+
+        // scale=<2 decimal places>
+        var scale_buf: [16]u8 = undefined;
+        const scale_str = std.fmt.bufPrint(&scale_buf, "{d:.2}", .{self.renderer_scale}) catch "?";
+        dispatch.writeKv(client_fd, "scale", scale_str);
+
+        // palette=<active name or "custom">
+        const palette_name: []const u8 = if (self.active_palette_name_len > 0)
+            self.active_palette_name_buf[0..self.active_palette_name_len]
+        else
+            "custom";
+        dispatch.writeKv(client_fd, "palette", palette_name);
+
+        dispatch.writeOk(client_fd);
+    }
+
+    fn handleStop(self: *App, client_fd: posix.fd_t) void {
+        dispatch.writeOk(client_fd);
+        self.running = false;
+    }
+
+    fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
+        if (fps < 1 or fps > 240) {
+            dispatch.writeError(client_fd, "fps must be between 1 and 240");
+            return;
+        }
+        const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
+        const interval = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = interval_ns },
+            .it_interval = .{ .sec = 0, .nsec = interval_ns },
+        };
+        posix.timerfd_settime(self.tfd, .{}, &interval, null) catch |err| {
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        self.frame_interval_ns = interval_ns;
+        dispatch.writeOk(client_fd);
+    }
+
+    fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
+        if (scale <= 0.0 or scale > 4.0) {
+            dispatch.writeError(client_fd, "scale must be a positive number (max 4.0)");
+            return;
+        }
+        self.renderer_scale = scale;
+        for (self.surfaces.items) |*s| {
+            s.renderer_scale = scale;
+        }
+        dispatch.writeOk(client_fd);
+    }
+
+    fn handleSetPalette(self: *App, client_fd: posix.fd_t, name: []const u8) void {
+        // Look up the named palette in the loaded palette list.
+        var found: ?[3]defaults.Rgb = null;
+        for (self.palettes) |*p| {
+            if (std.mem.eql(u8, p.nameSlice(), name)) {
+                found = p.colors;
+                break;
+            }
+        }
+        const colors = found orelse {
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "unknown palette \"{s}\"", .{name}) catch "unknown palette";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        self.effect.updatePalette(colors);
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        // Record active palette name.
+        const copy_len = @min(name.len, self.active_palette_name_buf.len);
+        @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
+        self.active_palette_name_len = copy_len;
+        dispatch.writeOk(client_fd);
+    }
+
+    fn handleReload(self: *App, client_fd: posix.fd_t) void {
+        const path = self.config_path orelse {
+            dispatch.writeError(client_fd, "config file not found");
+            return;
+        };
+        const load_result = config_mod.loadConfigFull(self.allocator, path) catch |err| {
+            var buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "config parse failed: {}", .{err}) catch "config parse failed";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        // Apply new config — update fields without tearing down EGL or surfaces.
+        // 1. fps / timerfd
+        const new_interval_ns = load_result.config.frame_interval_ns;
+        const new_interval = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = new_interval_ns },
+            .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
+        };
+        posix.timerfd_settime(self.tfd, .{}, &new_interval, null) catch {};
+        self.frame_interval_ns = new_interval_ns;
+        // 2. renderer_scale
+        self.renderer_scale = load_result.config.renderer_scale;
+        for (self.surfaces.items) |*s| {
+            s.renderer_scale = load_result.config.renderer_scale;
+        }
+        // 3. palette colors (stays within the same effect type — no shader rebind type mismatch)
+        self.effect.updatePalette(load_result.config.palette);
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        // 4. named palettes — replace the owned slice
+        self.allocator.free(self.palettes);
+        self.palettes = load_result.palettes;
+        // 5. reset active palette name (reload resets to config colors, i.e. "custom")
+        self.active_palette_name_len = 0;
+        dispatch.writeOk(client_fd);
+    }
+
     pub fn deinit(self: *App) void {
+        if (self.ipc_server) |*srv| srv.deinit();
+        self.ipc_server = null;
+        self.allocator.free(self.palettes);
+        posix.close(self.tfd);
+        posix.close(self.sig_fd);
+
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
             var made_current = false;
