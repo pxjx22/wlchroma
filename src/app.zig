@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const c = @import("wl.zig").c;
@@ -162,6 +163,11 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
+        const perf_logs_enabled = builtin.mode == .Debug;
+        const perf_log_interval: u64 = 120;
+        var render_tick_count: u64 = 0;
+        var render_tick_total_ns: u64 = 0;
+
         // Pre-allocate to prevent ArrayList realloc invalidating SurfaceState pointers
         try self.surfaces.ensureTotalCapacity(self.allocator, self.outputs.items.len);
 
@@ -201,11 +207,16 @@ pub const App = struct {
                         std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
                         continue;
                     }
+                    const shader_init_start_ns: u64 = if (perf_logs_enabled) @intCast(std.time.nanoTimestamp()) else 0;
                     self.effect_shader = EffectShader.init(&self.effect) catch |err| blk: {
-                        std.debug.print("FATAL: EffectShader.init failed: {} -- " ++
-                            "EGL surfaces will render black until shader is fixed\n", .{err});
+                        std.debug.print("shader init failed: {} -- using CPU fallback on this session\n", .{err});
                         break :blk null;
                     };
+                    if (perf_logs_enabled) {
+                        const shader_init_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+                        const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
+                        std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
+                    }
                     // Bind invariant GL state once -- program, VBO, vertex layout,
                     // and effect-specific static data (palette / phase).
                     if (self.effect_shader) |*sh| sh.bind(&self.effect);
@@ -234,7 +245,10 @@ pub const App = struct {
                 }
             }
             if (!shader_ready) {
-                std.debug.print("warning: no EGL surface could be made current; GPU rendering disabled for this session\n", .{});
+                std.debug.print("warning: no EGL surface could be made current; using CPU fallback on this session\n", .{});
+            }
+            if (!shader_ready and self.effect.isGpuOnly()) {
+                self.forceCpuFallbackForGpuOnly();
             }
         }
 
@@ -313,10 +327,22 @@ pub const App = struct {
                 var buf: [8]u8 = undefined;
                 _ = posix.read(tfd, &buf) catch {};
 
+                const render_tick_start_ns: u64 = if (perf_logs_enabled) @intCast(std.time.nanoTimestamp()) else 0;
+
                 const sh_ptr: ?*const EffectShader = if (self.effect_shader) |*sh| sh else null;
                 const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
                 for (self.surfaces.items) |*s| {
                     s.renderTick(sh_ptr, blit_ptr);
+                }
+                if (perf_logs_enabled) {
+                    const render_tick_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+                    render_tick_count += 1;
+                    render_tick_total_ns += render_tick_end_ns - render_tick_start_ns;
+                    if (render_tick_count % perf_log_interval == 0) {
+                        const avg_tick_ms = @as(f64, @floatFromInt(render_tick_total_ns / perf_log_interval)) / std.time.ns_per_ms;
+                        std.debug.print("perf: average renderTick over last {} timer ticks: {d:.3}ms across {} surfaces\n", .{ perf_log_interval, avg_tick_ms, self.surfaces.items.len });
+                        render_tick_total_ns = 0;
+                    }
                 }
 
                 var any_alive = false;
@@ -393,6 +419,18 @@ pub const App = struct {
         };
 
         self.dispatchCommand(client_fd, cmd);
+    }
+
+    fn forceCpuFallbackForGpuOnly(self: *App) void {
+        if (!self.effect.isGpuOnly()) return;
+        self.effect_shader = null;
+        if (self.blit_shader) |*bs| bs.deinit();
+        self.blit_shader = null;
+        for (self.surfaces.items) |*s| {
+            s.forceCpuFallback();
+        }
+        if (self.egl_ctx) |*ctx| ctx.deinit();
+        self.egl_ctx = null;
     }
 
     /// Execute a parsed IpcCommand against the live App state.

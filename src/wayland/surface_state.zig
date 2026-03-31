@@ -4,6 +4,7 @@ const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
 const Effect = @import("../render/effect.zig").Effect;
 const EffectShader = @import("../render/effect_shader.zig").EffectShader;
+const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
 const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
@@ -26,6 +27,7 @@ pub const SurfaceState = struct {
     shm_pool: ?ShmPool,
     shm: *c.wl_shm,
     effect: *Effect,
+    shm_effect: ?Effect,
     cell_grid: []defaults.Rgb,
     grid_w: usize,
     grid_h: usize,
@@ -87,6 +89,7 @@ pub const SurfaceState = struct {
             .shm_pool = null,
             .shm = shm,
             .effect = effect,
+            .shm_effect = null,
             .cell_grid = &.{},
             .grid_w = 0,
             .grid_h = 0,
@@ -187,9 +190,10 @@ pub const SurfaceState = struct {
         const idx = pool.acquireBuffer() orelse return;
 
         if (getMonotonicMs()) |now_ms| {
-            self.effect.maybeAdvance(now_ms);
+            self.cpuEffect().maybeAdvance(now_ms);
         }
-        self.effect.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
+        const cpu_effect = self.cpuEffect();
+        cpu_effect.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
         framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), self.pixel_w, self.pixel_h);
 
         c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
@@ -262,6 +266,119 @@ pub const SurfaceState = struct {
             self.cell_grid = &.{};
         }
         self.configured = false;
+        self.shm_effect = null;
+    }
+
+    pub fn forceCpuFallback(self: *SurfaceState) void {
+        if (self.dead) return;
+        const pw = self.pixel_w;
+        const ph = self.pixel_h;
+        if (pw == 0 or ph == 0) return;
+
+        if (self.offscreen) |*ofs| {
+            var gl_ok = false;
+            if (self.egl_surface) |*egl_surf| {
+                if (self.egl_ctx) |ctx| {
+                    gl_ok = egl_surf.makeCurrent(ctx);
+                }
+            }
+            if (gl_ok) ofs.deinit();
+            self.offscreen = null;
+        }
+        if (self.egl_surface) |*egl_surf| {
+            egl_surf.deinit();
+            self.egl_surface = null;
+        }
+        self.egl_ctx = null;
+        self.configureShmFallback(pw, ph);
+    }
+
+    fn cpuEffect(self: *SurfaceState) *Effect {
+        if (self.effect.isGpuOnly()) {
+            self.ensureShmFallbackEffect();
+            return &(self.shm_effect.?);
+        }
+        self.shm_effect = null;
+        return self.effect;
+    }
+
+    fn ensureShmFallbackEffect(self: *SurfaceState) void {
+        const colors = self.effect.gpuPalette() orelse return;
+        if (self.shm_effect == null) {
+            self.shm_effect = Effect{ .colormix = ColormixRenderer.init(
+                colors[0],
+                colors[1],
+                colors[2],
+                self.effect.frameAdvanceMs(),
+                self.effect.speed(),
+            ) };
+        } else {
+            self.shm_effect.?.updatePalette(colors);
+        }
+    }
+
+    fn configureShmFallback(self: *SurfaceState, pw: u32, ph: u32) void {
+        // --- SHM/CPU fallback path ---
+        const grid_w = @max(@divFloor(pw, @as(u32, defaults.CELL_W)), 1);
+        const grid_h = @max(@divFloor(ph, @as(u32, defaults.CELL_H)), 1);
+        self.grid_w = grid_w;
+        self.grid_h = grid_h;
+
+        if (self.cell_grid.len > 0) {
+            self.allocator.free(self.cell_grid);
+            self.cell_grid = &.{};
+        }
+        self.cell_grid = self.allocator.alloc(defaults.Rgb, grid_w * grid_h) catch {
+            std.debug.print("OOM allocating cell_grid\n", .{});
+            self.configured = false;
+            return;
+        };
+
+        if (self.shm_pool) |*old| {
+            old.deinit();
+            self.shm_pool = null;
+            self.buf_ctx = undefined;
+        }
+        self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
+            std.debug.print("failed to create ShmPool\n", .{});
+            self.configured = false;
+            return;
+        };
+        self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
+        self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
+        self.shm_pool.?.attachListeners(
+            &SurfaceState.buf_release_listener,
+            @ptrCast(&self.buf_ctx[0]),
+            @ptrCast(&self.buf_ctx[1]),
+        );
+
+        const cpu_effect = self.cpuEffect();
+        cpu_effect.renderGrid(grid_w, grid_h, self.cell_grid);
+
+        var pool = &(self.shm_pool.?);
+        const idx = pool.acquireBuffer() orelse {
+            std.debug.print("no free buffer on configure\n", .{});
+            return;
+        };
+
+        framebuffer.expandCells(self.cell_grid, grid_w, grid_h, pool.pixelSlice(idx), pw, ph);
+
+        const wl_surface = self.layer_surface.wl_surface orelse return;
+        c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
+        c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+
+        if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
+        if (c.wl_surface_frame(wl_surface)) |cb| {
+            self.frame_callback = cb;
+            _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+        } else {
+            std.debug.print("configure: wl_surface_frame returned null (OOM)\n", .{});
+            self.frame_callback = null;
+        }
+
+        c.wl_surface_commit(wl_surface);
+        self.configured = true;
+        std.debug.print("configure: {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
     }
 };
 
@@ -372,67 +489,7 @@ fn layerSurfaceConfigure(
         self.egl_ctx = null;
     }
 
-    // --- SHM/CPU fallback path ---
-    const grid_w = @max(@divFloor(pw, @as(u32, defaults.CELL_W)), 1);
-    const grid_h = @max(@divFloor(ph, @as(u32, defaults.CELL_H)), 1);
-    self.grid_w = grid_w;
-    self.grid_h = grid_h;
-
-    if (self.cell_grid.len > 0) {
-        self.allocator.free(self.cell_grid);
-        self.cell_grid = &.{};
-    }
-    self.cell_grid = self.allocator.alloc(defaults.Rgb, grid_w * grid_h) catch {
-        std.debug.print("OOM allocating cell_grid\n", .{});
-        self.configured = false;
-        return;
-    };
-
-    if (self.shm_pool) |*old| {
-        old.deinit();
-        self.shm_pool = null;
-        self.buf_ctx = undefined;
-    }
-    self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
-        std.debug.print("failed to create ShmPool\n", .{});
-        self.configured = false;
-        return;
-    };
-    self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
-    self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
-    self.shm_pool.?.attachListeners(
-        &SurfaceState.buf_release_listener,
-        @ptrCast(&self.buf_ctx[0]),
-        @ptrCast(&self.buf_ctx[1]),
-    );
-
-    // SHM/CPU fallback: render first frame from current effect state
-    self.effect.renderGrid(grid_w, grid_h, self.cell_grid);
-
-    var pool = &(self.shm_pool.?);
-    const idx = pool.acquireBuffer() orelse {
-        std.debug.print("no free buffer on configure\n", .{});
-        return;
-    };
-
-    framebuffer.expandCells(self.cell_grid, grid_w, grid_h, pool.pixelSlice(idx), pw, ph);
-
-    const wl_surface = self.layer_surface.wl_surface orelse return;
-    c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
-    c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-
-    if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
-    if (c.wl_surface_frame(wl_surface)) |cb| {
-        self.frame_callback = cb;
-        _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
-    } else {
-        std.debug.print("configure: wl_surface_frame returned null (OOM)\n", .{});
-        self.frame_callback = null;
-    }
-
-    c.wl_surface_commit(wl_surface);
-    self.configured = true;
-    std.debug.print("configure: {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
+    self.configureShmFallback(pw, ph);
 }
 
 /// Frame callback handler. Clears the pending flag and advances the

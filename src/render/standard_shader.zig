@@ -63,18 +63,12 @@ pub const StandardShader = struct {
         if (a_pos_raw < 0) return error.GlAttribNotFound;
         const a_pos_loc: c.GLuint = @intCast(a_pos_raw);
 
-        const u_time_loc = c.glGetUniformLocation(program, "u_time");
-        if (u_time_loc < 0) return error.GlUniformNotFound;
-        const u_resolution_loc = c.glGetUniformLocation(program, "u_resolution");
-        if (u_resolution_loc < 0) return error.GlUniformNotFound;
-        const u_phase_loc = c.glGetUniformLocation(program, "u_phase");
-        if (u_phase_loc < 0) return error.GlUniformNotFound;
-        const u_col0_loc = c.glGetUniformLocation(program, "u_col0");
-        if (u_col0_loc < 0) return error.GlUniformNotFound;
-        const u_col1_loc = c.glGetUniformLocation(program, "u_col1");
-        if (u_col1_loc < 0) return error.GlUniformNotFound;
-        const u_col2_loc = c.glGetUniformLocation(program, "u_col2");
-        if (u_col2_loc < 0) return error.GlUniformNotFound;
+        const u_time_loc = lookupUniform(program, "u_time");
+        const u_resolution_loc = lookupUniform(program, "u_resolution");
+        const u_phase_loc = lookupUniform(program, "u_phase");
+        const u_col0_loc = lookupUniform(program, "u_col0");
+        const u_col1_loc = lookupUniform(program, "u_col1");
+        const u_col2_loc = lookupUniform(program, "u_col2");
 
         const vertices = [_]f32{
             -1.0, -1.0,
@@ -133,7 +127,9 @@ pub const StandardShader = struct {
     }
 
     fn uploadStaticUniforms(self: *const StandardShader, phase: f32, palette: [3]Rgb) void {
-        c.glUniform1f(self.u_phase_loc, phase);
+        if (self.u_phase_loc >= 0) {
+            c.glUniform1f(self.u_phase_loc, phase);
+        }
         inline for (palette, 0..) |rgb, i| {
             const loc = switch (i) {
                 0 => self.u_col0_loc,
@@ -141,19 +137,33 @@ pub const StandardShader = struct {
                 2 => self.u_col2_loc,
                 else => unreachable,
             };
-            c.glUniform3f(
-                loc,
-                @as(f32, @floatFromInt(rgb.r)) / 255.0,
-                @as(f32, @floatFromInt(rgb.g)) / 255.0,
-                @as(f32, @floatFromInt(rgb.b)) / 255.0,
-            );
+            if (loc >= 0) {
+                c.glUniform3f(
+                    loc,
+                    @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                    @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                    @as(f32, @floatFromInt(rgb.b)) / 255.0,
+                );
+            }
         }
     }
 
     /// Upload per-frame uniforms: time and resolution.
     pub fn setUniforms(self: *const StandardShader, time: f32, w: f32, h: f32) void {
-        c.glUniform1f(self.u_time_loc, time);
-        c.glUniform2f(self.u_resolution_loc, w, h);
+        if (self.u_time_loc >= 0) {
+            c.glUniform1f(self.u_time_loc, time);
+        }
+        if (self.u_resolution_loc >= 0) {
+            c.glUniform2f(self.u_resolution_loc, w, h);
+        }
+    }
+
+    fn lookupUniform(program: c.GLuint, name: [:0]const u8) c.GLint {
+        const loc = c.glGetUniformLocation(program, name.ptr);
+        if (loc < 0) {
+            std.debug.print("standard_shader warning: uniform {s} optimized out or unavailable\n", .{name});
+        }
+        return loc;
     }
 
     pub fn draw(self: *const StandardShader) void {
