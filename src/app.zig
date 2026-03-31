@@ -386,21 +386,59 @@ pub const App = struct {
     }
 
     fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
-        _ = fps;
+        if (fps < 1 or fps > 240) {
+            dispatch.writeError(client_fd, "fps must be in range [1, 240]");
+            return;
+        }
+        const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
+        const interval = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = interval_ns },
+            .it_interval = .{ .sec = 0, .nsec = interval_ns },
+        };
+        posix.timerfd_settime(self.tfd, .{}, &interval, null) catch |err| {
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        self.frame_interval_ns = interval_ns;
+        dispatch.writeOk(client_fd);
     }
 
     fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
-        _ = scale;
+        if (scale <= 0.0 or scale > 4.0) {
+            dispatch.writeError(client_fd, "scale must be in range (0.0, 4.0]");
+            return;
+        }
+        self.renderer_scale = scale;
+        for (self.surfaces.items) |*s| {
+            s.renderer_scale = scale;
+        }
+        dispatch.writeOk(client_fd);
     }
 
     fn handleSetPalette(self: *App, client_fd: posix.fd_t, name: []const u8) void {
-        dispatch.writeError(client_fd, "not implemented");
-        _ = self;
-        _ = name;
+        // Look up the named palette in the loaded palette list.
+        var found: ?[3]defaults.Rgb = null;
+        for (self.palettes) |*p| {
+            if (std.mem.eql(u8, p.nameSlice(), name)) {
+                found = p.colors;
+                break;
+            }
+        }
+        const colors = found orelse {
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "unknown palette \"{s}\"", .{name}) catch "unknown palette";
+            dispatch.writeError(client_fd, msg);
+            return;
+        };
+        self.effect.updatePalette(colors);
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        // Record active palette name.
+        const copy_len = @min(name.len, self.active_palette_name_buf.len);
+        @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
+        self.active_palette_name_len = copy_len;
+        dispatch.writeOk(client_fd);
     }
 
     fn handleReload(self: *App, client_fd: posix.fd_t) void {
