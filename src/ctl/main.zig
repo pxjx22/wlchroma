@@ -141,16 +141,19 @@ fn run() !void {
             // Trim trailing \r if present.
             const line = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
 
-            // Print line to stdout with newline.
-            writeAll(1, line);
-            writeAll(1, "\n");
-
             if (std.mem.eql(u8, line, "ok")) {
                 ok = true;
                 break :outer;
             } else if (std.mem.startsWith(u8, line, "error:")) {
+                // Print error line to stderr, not stdout.
+                writeAll(2, line);
+                writeAll(2, "\n");
                 had_error = true;
                 break :outer;
+            } else {
+                // Data line (e.g. key=value from query).
+                writeAll(1, line);
+                writeAll(1, "\n");
             }
             start += end;
         }

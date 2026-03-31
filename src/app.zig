@@ -373,11 +373,21 @@ pub const App = struct {
                 return;
             },
             error.MissingArgument => {
-                dispatch.writeError(client_fd, "missing argument");
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                var buf: [96]u8 = undefined;
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "missing argument";
+                dispatch.writeError(client_fd, msg);
                 return;
             },
             error.BadArgument => {
-                dispatch.writeError(client_fd, "invalid argument");
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                var buf: [96]u8 = undefined;
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "invalid argument";
+                dispatch.writeError(client_fd, msg);
                 return;
             },
         };
@@ -431,7 +441,7 @@ pub const App = struct {
 
     fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
         if (fps < 1 or fps > 240) {
-            dispatch.writeError(client_fd, "fps must be in range [1, 240]");
+            dispatch.writeError(client_fd, "fps must be between 1 and 240");
             return;
         }
         const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
@@ -451,7 +461,7 @@ pub const App = struct {
 
     fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
         if (scale <= 0.0 or scale > 4.0) {
-            dispatch.writeError(client_fd, "scale must be in range (0.0, 4.0]");
+            dispatch.writeError(client_fd, "scale must be a positive number (max 4.0)");
             return;
         }
         self.renderer_scale = scale;
@@ -487,12 +497,12 @@ pub const App = struct {
 
     fn handleReload(self: *App, client_fd: posix.fd_t) void {
         const path = self.config_path orelse {
-            dispatch.writeError(client_fd, "no config path known");
+            dispatch.writeError(client_fd, "config file not found");
             return;
         };
         const load_result = config_mod.loadConfigFull(self.allocator, path) catch |err| {
             var buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "config parse error: {}", .{err}) catch "config parse error";
+            const msg = std.fmt.bufPrint(&buf, "config parse failed: {}", .{err}) catch "config parse failed";
             dispatch.writeError(client_fd, msg);
             return;
         };
