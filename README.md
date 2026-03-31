@@ -1,6 +1,6 @@
 # wlchroma
 
-`wlchroma` is a low-power animated wallpaper for Linux Wayland desktops. It renders a simple colormix shader behind your windows and defaults to a deliberate 15 fps cadence to keep CPU/GPU use modest.
+`wlchroma` is a low-power animated wallpaper for Linux Wayland desktops. It renders animated palette-driven wallpaper effects behind your windows and defaults to a deliberate 15 fps cadence to keep CPU/GPU use modest.
 
 ## Requirements
 
@@ -121,6 +121,7 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 ### Config Notes
 
 - `fps` defaults to `15`. That is an intentional low-power default for the wallpaper animation; it is not tied to your monitor refresh rate.
+- Config file `fps` must be a whole number from `1` to `120`.
 - Config is loaded once at startup. Use `wlchroma-ctl reload` to apply changes without restarting (see [Runtime Control](#runtime-control)).
 - `renderer.scale = 1.0` renders at native resolution. Lower values render to a smaller offscreen image and then scale it up, which usually reduces GPU work but makes the result look softer or chunkier.
 - `renderer.scale` must be between `0.1` and `1.0`. Values from `0.95` up to but not including `1.0` are rejected.
@@ -133,17 +134,17 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 |---|---|
 | `"colormix"` | Smooth CPU-rendered color gradient blend across the palette (default; works without GPU) |
 | `"glass_drift"` | Layered frosted-glass pane animation using three sinusoidal drifting planes |
-| `"aurora_bands"` | Diagonal aurora ribbons — three sheared sin waves drifting across both axes for an organic banded aurora feel |
-| `"cloud_chamber"` | Soft slow fog using products of two-axis sin waves blended over a stable base colour for a gentle atmospheric look |
-| `"ribbon_orbit"` | Soft polar-coordinate arcs orbiting the screen center with a slow ambient fill between them (recommended speed: 1.0) |
-| `"plasma_quilt"` | Classic plasma: four angled sin waves in opposing directions produce a smoothly churning colour field (recommended speed: 0.7) |
-| `"liquid_marble"` | UV-warped fract banding with wide smoothstep veins and a shimmer layer for a flowing marble stone look |
+| `"frond_haze"` | Organic branching haze with drifting bloom pockets and palette-tinted canopy glow |
+| `"lumen_tunnel"` | Rotating tunnel shells with palette-colored ribs, flare bands, and screen shimmer |
 | `"velvet_mesh"` | Glowing abs(sin) lattice grid with a soft square-bloom highlight on intersections and a subtle colour shimmer between nodes |
-| `"soft_interference"` | Drifting concentric interference rings from two slowly orbiting focal points |
 | `"starfield_fog"` | Procedural hash-based star field with additive star glow on a smoothly varying nebula fog backdrop |
-| `"tube_lights"` | Neon tube bands with smooth colour crossfades, depth-modulated highlights, and slowly scrolling surface shading (recommended speed: 0.8) |
+| `"gyro_echo"` | Reflective gyroid tunnel with palette-tinted materials, soft fog, and a slow orbiting camera |
+| `"hex_floret"` | Subdivided hexagon floret relief with palette-based ceramic shading and slow camera drift |
+| `"dither_orb"` | Ordered-dither raymarched orb with palette-aware lighting and a striped dithered backdrop |
+| `"signal_matrix"` | Procedural matrix-like glyph field with palette-tinted scanlines, glow, and vertical signal drift |
+| `"fract_lattice"` | Recursive box-lattice fractal carving with palette-aware sky shading and slow drifting camera motion |
 
-All GPU effects require EGL. If EGL is unavailable, `wlchroma` falls back to `colormix` automatically and logs a warning.
+All effects except `colormix` use the GPU path. If GPU rendering is unavailable for the session, or a given surface has to fall back to SHM, `wlchroma` renders a `colormix` fallback automatically and logs a warning.
 - `[effect.settings].speed` scales animation velocity for whichever effect is active. Valid range: `0.25`–`2.5`. Defaults to `1.0`. Out-of-range values exit at startup with a clear error.
 
 ### Config v2: Named Palettes
@@ -189,13 +190,18 @@ Available commands:
 | Command | Description |
 |---|---|
 | `wlchroma-ctl query` | Print current effect, fps, scale, and active palette |
-| `wlchroma-ctl set-fps <1-240>` | Change animation frame rate |
-| `wlchroma-ctl set-scale <0.01-4.0>` | Change renderer scale factor |
+| `wlchroma-ctl set-fps <1-240>` | Change animation frame rate for the running process |
+| `wlchroma-ctl set-scale <scale>` | Change renderer scale factor for the running process |
 | `wlchroma-ctl set-palette <name>` | Switch to a named palette (requires config v2) |
 | `wlchroma-ctl reload` | Re-read config file and apply all changes |
 | `wlchroma-ctl stop` | Gracefully shut down wlchroma |
 
 `wlchroma-ctl` exits 0 on success and 1 on error. Errors are printed to stderr.
+
+Runtime control notes:
+
+- `set-fps` accepts `1` to `240` for the live process, even though config-file `fps` is limited to `1` to `120`.
+- `set-scale` accepts any positive value up to `4.0` for the live process. Values above `1.0` are valid at runtime, unlike config-file `renderer.scale`, which is limited to `0.1` to `1.0`.
 
 ### Direct socket access
 
@@ -221,7 +227,7 @@ All responses are newline-terminated. Multi-line responses (such as `query`) end
 
 - Linux Wayland only; no X11 support
 - Requires a Wayland compositor that exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`)
-- The public v1 effect surface includes eleven effects (`colormix`, `glass_drift`, and nine GPU shader effects); there is no per-output effect config yet
+- The public effect surface currently includes eleven effects: `colormix` plus ten GPU shader effects; there is no per-output effect config yet
 - Multi-monitor output is supported, but all outputs use the same global config; there is no per-output config yet
 - Outputs added after `wlchroma` starts do not get a wallpaper surface until you restart it
 
@@ -229,5 +235,5 @@ All responses are newline-terminated. Multi-line responses (such as `query`) end
 
 - If the app exits immediately, make sure you are running inside a Wayland session and your compositor exposes `zwlr_layer_shell_v1` (`wlr-layer-shell`).
 - If build linking fails, install the missing Wayland/EGL/GLES development packages and confirm `wayland-scanner` is on your `PATH`.
-- If a config file is ignored or rejected, check that it lives at one of the lookup paths above and starts with `version = 1`.
+- If a config file is ignored or rejected, check that it lives at one of the lookup paths above and starts with a supported version header such as `version = 1` or `version = 2`.
 - If GPU initialization fails, `wlchroma` should continue on the CPU/SHM fallback path, but reduced-resolution GPU scaling options will not apply.

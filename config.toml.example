@@ -13,15 +13,15 @@ upscale_filter = "nearest"
 # colormix automatically if GPU is unavailable.
 name = "colormix"
 # name = "glass_drift"
-# name = "aurora_bands"
-# name = "cloud_chamber"
-# name = "ribbon_orbit"
-# name = "plasma_quilt"
-# name = "liquid_marble"
+# name = "frond_haze"
+# name = "lumen_tunnel"
 # name = "velvet_mesh"
-# name = "soft_interference"
 # name = "starfield_fog"
-# name = "tube_lights"
+# name = "gyro_echo"
+# name = "hex_floret"
+# name = "dither_orb"
+# name = "signal_matrix"
+# name = "fract_lattice"
 
 [effect.settings]
 # Animation speed multiplier. Range: 0.25–2.5. Default: 1.0.
