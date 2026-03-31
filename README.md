@@ -1,6 +1,6 @@
 # wlchroma
 
-`wlchroma` is a low-power animated wallpaper for Linux Wayland desktops. It renders animated palette-driven wallpaper effects behind your windows and defaults to a deliberate 15 fps cadence to keep CPU/GPU use modest.
+`wlchroma` is an animated wallpaper for Linux Wayland desktops. It renders palette-driven wallpaper effects behind your windows with configurable frame rate, scale, and runtime controls.
 
 ## Requirements
 
@@ -120,7 +120,7 @@ cp config.toml.example "$HOME/.config/wlchroma/config.toml"
 
 ### Config Notes
 
-- `fps` defaults to `15`. That is an intentional low-power default for the wallpaper animation; it is not tied to your monitor refresh rate.
+- `fps` defaults to `15` in the example/default config. It controls wallpaper animation cadence only; it is not tied to your monitor refresh rate.
 - Config file `fps` must be a whole number from `1` to `120`.
 - Config is loaded once at startup. Use `wlchroma-ctl reload` to apply changes without restarting (see [Runtime Control](#runtime-control)).
 - `renderer.scale = 1.0` renders at native resolution. Lower values render to a smaller offscreen image and then scale it up, which usually reduces GPU work but makes the result look softer or chunkier.
