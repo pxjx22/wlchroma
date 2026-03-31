@@ -14,7 +14,11 @@ const EffectShader = @import("render/effect_shader.zig").EffectShader;
 const defaults = @import("config/defaults.zig");
 const config_mod = @import("config/config.zig");
 const AppConfig = config_mod.AppConfig;
+const NamedPalette = config_mod.NamedPalette;
 const UpscaleFilter = config_mod.UpscaleFilter;
+const server_mod = @import("ipc/server.zig");
+const IpcServer = server_mod.IpcServer;
+const dispatch = @import("ipc/dispatch.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -30,13 +34,33 @@ pub const App = struct {
     frame_interval_ns: u32,
     renderer_scale: f32,
     upscale_filter: UpscaleFilter,
+    // --- IPC fields (T009) ---
+    tfd: posix.fd_t,
+    ipc_server: ?IpcServer,
+    /// Config path for reload. Null when wlchroma was started without --config
+    /// and no default config file was found.
+    config_path: ?[]const u8,
+    /// Named palettes loaded from [[palettes]] config table. Owned by App.
+    palettes: []NamedPalette,
+    /// Name of the currently active palette, or zero-length = "custom".
+    active_palette_name_buf: [64]u8,
+    active_palette_name_len: usize,
 
-    pub fn init(allocator: std.mem.Allocator, config: AppConfig) !App {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: AppConfig,
+        palettes: []NamedPalette,
+        config_path: ?[]const u8,
+    ) !App {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
         errdefer c.wl_display_disconnect(display);
 
         // Build effect from config first (before EGL check).
         var effect = Effect.init(&config);
+
+        // Create the timerfd here so it is accessible as a field for set_fps.
+        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer posix.close(tfd);
 
         var app = App{
             .allocator = allocator,
@@ -52,6 +76,12 @@ pub const App = struct {
             .frame_interval_ns = config.frame_interval_ns,
             .renderer_scale = config.renderer_scale,
             .upscale_filter = config.upscale_filter,
+            .tfd = tfd,
+            .ipc_server = null,
+            .config_path = config_path,
+            .palettes = palettes,
+            .active_palette_name_buf = std.mem.zeroes([64]u8),
+            .active_palette_name_len = 0,
         };
         errdefer app.registry.deinit();
         errdefer {
@@ -109,6 +139,12 @@ pub const App = struct {
                 std.debug.print("output: {s} {}x{} refresh={}mHz\n", .{ out.name, out.width, out.height, out.refresh_mhz });
             }
         }
+
+        // Start IPC server. Failure is non-fatal (Constitution III: graceful degradation).
+        app.ipc_server = IpcServer.init() catch |err| blk: {
+            std.debug.print("ipc: failed to start IPC server: {} — continuing without IPC\n", .{err});
+            break :blk null;
+        };
 
         return app;
     }
@@ -191,8 +227,8 @@ pub const App = struct {
         }
 
         // --- poll+timerfd main loop ---
-        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
-        defer posix.close(tfd);
+        // tfd was created in App.init and stored as self.tfd.
+        const tfd = self.tfd;
 
         const timer_ns: u32 = self.frame_interval_ns;
         std.debug.print("timer interval: {}ns ({}fps)\n", .{ timer_ns, 1_000_000_000 / @as(u64, timer_ns) });
@@ -204,11 +240,15 @@ pub const App = struct {
         try posix.timerfd_settime(tfd, .{}, &interval, null);
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
+        const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
 
-        var fds = [2]posix.pollfd{
+        var fds = [3]posix.pollfd{
             .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = ipc_fd, .events = linux.POLL.IN, .revents = 0 },
         };
+        // How many fds are active in the poll call.
+        const nfds: u32 = if (self.ipc_server != null) 3 else 2;
 
         while (self.running) {
             if (c.wl_display_flush(self.display) < 0) {
@@ -224,7 +264,8 @@ pub const App = struct {
 
             fds[0].revents = 0;
             fds[1].revents = 0;
-            _ = posix.poll(&fds, -1) catch |err| {
+            fds[2].revents = 0;
+            _ = posix.poll(fds[0..nfds], -1) catch |err| {
                 c.wl_display_cancel_read(self.display);
                 std.debug.print("poll error: {}\n", .{err});
                 break;
@@ -275,10 +316,104 @@ pub const App = struct {
                     self.running = false;
                 }
             }
+
+            // Handle incoming IPC command (fds[2]).
+            if (nfds == 3 and fds[2].revents & linux.POLL.IN != 0) {
+                self.handleIpcEvent();
+            }
         }
     }
 
+    /// Accept one IPC client connection, read a command line, dispatch it,
+    /// write the response, and close the client fd.
+    fn handleIpcEvent(self: *App) void {
+        var srv = &(self.ipc_server orelse return);
+        const client_fd = srv.accept() catch |err| {
+            std.debug.print("ipc: accept failed: {}\n", .{err});
+            return;
+        };
+        defer posix.close(client_fd);
+
+        var line_buf: [server_mod.LINE_MAX + 1]u8 = undefined;
+        const line = IpcServer.readLine(client_fd, &line_buf) catch |err| {
+            std.debug.print("ipc: readLine failed: {}\n", .{err});
+            return;
+        };
+
+        const cmd = dispatch.parseLine(line) catch |err| switch (err) {
+            error.UnknownCommand => {
+                // Extract verb for the error message.
+                const space = std.mem.indexOfScalar(u8, line, ' ');
+                const verb = if (space) |s| line[0..s] else line;
+                dispatch.writeUnknownCommand(client_fd, verb);
+                return;
+            },
+            error.MissingArgument => {
+                dispatch.writeError(client_fd, "missing argument");
+                return;
+            },
+            error.BadArgument => {
+                dispatch.writeError(client_fd, "invalid argument");
+                return;
+            },
+        };
+
+        self.dispatchCommand(client_fd, cmd);
+    }
+
+    /// Execute a parsed IpcCommand against the live App state.
+    fn dispatchCommand(self: *App, client_fd: posix.fd_t, cmd: dispatch.IpcCommand) void {
+        switch (cmd) {
+            .query => self.handleQuery(client_fd),
+            .stop => self.handleStop(client_fd),
+            .set_fps => |fps| self.handleSetFps(client_fd, fps),
+            .set_scale => |scale| self.handleSetScale(client_fd, scale),
+            .set_palette => |args| self.handleSetPalette(client_fd, args.nameSlice()),
+            .reload => self.handleReload(client_fd),
+        }
+    }
+
+    // --- IPC command handlers (stubs — filled in per user story phase) ---
+
+    fn handleQuery(self: *App, client_fd: posix.fd_t) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+    }
+
+    fn handleStop(self: *App, client_fd: posix.fd_t) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+    }
+
+    fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+        _ = fps;
+    }
+
+    fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+        _ = scale;
+    }
+
+    fn handleSetPalette(self: *App, client_fd: posix.fd_t, name: []const u8) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+        _ = name;
+    }
+
+    fn handleReload(self: *App, client_fd: posix.fd_t) void {
+        dispatch.writeError(client_fd, "not implemented");
+        _ = self;
+    }
+
     pub fn deinit(self: *App) void {
+        if (self.ipc_server) |*srv| srv.deinit();
+        self.ipc_server = null;
+        self.allocator.free(self.palettes);
+        posix.close(self.tfd);
+
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
             var made_current = false;
