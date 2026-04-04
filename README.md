@@ -29,6 +29,10 @@ Package names vary by distro, but the build expects the libraries named in `buil
 zig build
 ```
 
+## Contributing
+
+See `CONTRIBUTING.md` for general contribution guidance and `AI_CONTRIBUTING.md` for agent-specific rules.
+
 ## Run
 
 ```bash

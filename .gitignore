@@ -6,6 +6,7 @@ zig-out/
 
 # Scaffolding and local tooling — not part of the project source
 .claude/
+.opencode/
 .specify/
 specs/
 appbreaker.md
