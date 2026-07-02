@@ -41,6 +41,9 @@ pub const App = struct {
     /// Set when GPU pipeline init failed permanently (shader compile/link or
     /// no surface could be made current); prevents retrying every tick.
     gpu_pipeline_failed: bool,
+    /// Frame timer state: armed while at least one surface exists, disarmed
+    /// at zero surfaces so an output-less daemon sleeps at ~0% CPU.
+    timer_armed: bool,
     running: bool,
     frame_interval_ns: u32,
     renderer_scale: f32,
@@ -99,6 +102,7 @@ pub const App = struct {
             .effect_shader = null,
             .blit_shader = null,
             .gpu_pipeline_failed = false,
+            .timer_armed = false,
             .running = true,
             .frame_interval_ns = config.frame_interval_ns,
             .renderer_scale = config.renderer_scale,
@@ -210,6 +214,37 @@ pub const App = struct {
         }
 
         self.ensureGpuPipeline();
+        self.updateFrameTimer();
+    }
+
+    /// Arm the frame timer when surfaces exist, disarm it when none do.
+    /// Re-arming uses the *current* frame_interval_ns so a set-fps issued
+    /// while idle takes effect on resume.
+    fn updateFrameTimer(self: *App) void {
+        const want_armed = self.surfaces.items.len > 0;
+        if (want_armed == self.timer_armed) return;
+
+        if (want_armed) {
+            const ns = self.frame_interval_ns;
+            const interval = linux.itimerspec{
+                .it_value = .{ .sec = 0, .nsec = ns },
+                .it_interval = .{ .sec = 0, .nsec = ns },
+            };
+            sys.timerfdSettime(self.tfd, &interval) catch |err| {
+                std.debug.print("frame timer arm failed: {}\n", .{err});
+                return;
+            };
+            self.timer_armed = true;
+            std.debug.print("frame timer armed ({}fps)\n", .{1_000_000_000 / @as(u64, ns)});
+        } else {
+            const disarm = std.mem.zeroes(linux.itimerspec);
+            sys.timerfdSettime(self.tfd, &disarm) catch |err| {
+                std.debug.print("frame timer disarm failed: {}\n", .{err});
+                return;
+            };
+            self.timer_armed = false;
+            std.debug.print("frame timer disarmed (no outputs)\n", .{});
+        }
     }
 
     /// Destroy surfaces that are dead (compositor closed the layer surface)
@@ -339,17 +374,10 @@ pub const App = struct {
         self.syncSurfaces();
 
         // --- poll+timerfd main loop ---
-        // tfd was created in App.init and stored as self.tfd.
+        // tfd was created in App.init and stored as self.tfd; syncSurfaces
+        // arms/disarms it as surfaces come and go (zero-output start stays
+        // disarmed until the first output arrives).
         const tfd = self.tfd;
-
-        const timer_ns: u32 = self.frame_interval_ns;
-        std.debug.print("timer interval: {}ns ({}fps)\n", .{ timer_ns, 1_000_000_000 / @as(u64, timer_ns) });
-
-        const interval = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = timer_ns },
-            .it_interval = .{ .sec = 0, .nsec = timer_ns },
-        };
-        try sys.timerfdSettime(tfd, &interval);
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
         const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
@@ -432,18 +460,6 @@ pub const App = struct {
                         std.debug.print("perf: average renderTick over last {} timer ticks: {d:.3}ms across {} surfaces\n", .{ perf_log_interval, avg_tick_ms, self.surfaces.items.len });
                         render_tick_total_ns = 0;
                     }
-                }
-
-                var any_alive = false;
-                for (self.surfaces.items) |s| {
-                    if (!s.dead) {
-                        any_alive = true;
-                        break;
-                    }
-                }
-                if (!any_alive) {
-                    std.debug.print("all surfaces dead, exiting\n", .{});
-                    self.running = false;
                 }
             }
 
@@ -572,16 +588,20 @@ pub const App = struct {
             return;
         }
         const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
-        const interval = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = interval_ns },
-            .it_interval = .{ .sec = 0, .nsec = interval_ns },
-        };
-        sys.timerfdSettime(self.tfd, &interval) catch |err| {
-            var buf: [64]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
-            dispatch.writeError(client_fd, msg);
-            return;
-        };
+        // Only touch the timerfd while armed; while idle at zero outputs the
+        // new interval is stored and applied on the next arm.
+        if (self.timer_armed) {
+            const interval = linux.itimerspec{
+                .it_value = .{ .sec = 0, .nsec = interval_ns },
+                .it_interval = .{ .sec = 0, .nsec = interval_ns },
+            };
+            sys.timerfdSettime(self.tfd, &interval) catch |err| {
+                var buf: [64]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
+                dispatch.writeError(client_fd, msg);
+                return;
+            };
+        }
         self.frame_interval_ns = interval_ns;
         dispatch.writeOk(client_fd);
     }
@@ -634,13 +654,16 @@ pub const App = struct {
             return;
         };
         // Apply new config — update fields without tearing down EGL or surfaces.
-        // 1. fps / timerfd
+        // 1. fps / timerfd (only touched while armed; stored interval applies
+        //    on the next arm when idle at zero outputs)
         const new_interval_ns = load_result.config.frame_interval_ns;
-        const new_interval = linux.itimerspec{
-            .it_value = .{ .sec = 0, .nsec = new_interval_ns },
-            .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
-        };
-        sys.timerfdSettime(self.tfd, &new_interval) catch {};
+        if (self.timer_armed) {
+            const new_interval = linux.itimerspec{
+                .it_value = .{ .sec = 0, .nsec = new_interval_ns },
+                .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
+            };
+            sys.timerfdSettime(self.tfd, &new_interval) catch {};
+        }
         self.frame_interval_ns = new_interval_ns;
         // 2. renderer_scale
         self.renderer_scale = load_result.config.renderer_scale;
