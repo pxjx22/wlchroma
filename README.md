@@ -136,7 +136,7 @@ Palette names must be unique. The initial colors come from `[effect.settings].pa
 |---|---|
 | `wlchroma-ctl query` | Print current effect, fps, scale, and active palette |
 | `wlchroma-ctl set-fps <1-240>` | Change frame rate (runtime range is wider than config) |
-| `wlchroma-ctl set-scale <scale>` | Change scale factor (runtime accepts up to `4.0`) |
+| `wlchroma-ctl set-scale <scale>` | Change render scale (`0.1`–`1.0`, applies immediately; GPU path only) |
 | `wlchroma-ctl set-palette <name>` | Switch to a named palette (config v2 required) |
 | `wlchroma-ctl reload` | Re-read config file and apply changes |
 | `wlchroma-ctl stop` | Shut down wlchroma gracefully |
@@ -145,7 +145,7 @@ Exit codes: `0` on success, `1` on error (errors printed to stderr).
 
 **Runtime vs. config ranges:**
 - `set-fps` accepts `1`–`240` at runtime; config file `fps` is limited to `1`–`120`.
-- `set-scale` accepts any positive value up to `4.0` at runtime; config file `renderer.scale` is limited to `0.1`–`1.0`.
+- `set-scale` matches the config file's `renderer.scale` rules: `0.1`–`1.0`, with values from `0.95` to just under `1.0` rejected as too close to native.
 
 ### Direct Socket Access
 

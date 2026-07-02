@@ -335,13 +335,8 @@ pub const App = struct {
 
                 // Initialize blit shader for offscreen upscale pass.
                 if (self.renderer_scale < 1.0) {
-                    self.blit_shader = BlitShader.init() catch |err| blk: {
-                        std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
-                        break :blk null;
-                    };
-                    if (self.blit_shader) |*bs| {
-                        bs.bind();
-                    } else {
+                    self.ensureBlitShader();
+                    if (self.blit_shader == null) {
                         // Blit shader unavailable: tear down all offscreen FBOs.
                         for (self.surfaces.items) |surf| {
                             if (surf.offscreen) |*ofs| {
@@ -362,6 +357,22 @@ pub const App = struct {
             if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
         }
         // else: no EGL surface yet — try again on a later sync pass.
+    }
+
+    /// Compile and bind the blit shader if it is not already available.
+    /// Requires an initialized effect shader and a current EGL context.
+    /// Lazy so set-scale can enable offscreen rendering mid-session even
+    /// when the daemon started at scale 1.0 (blit skipped at pipeline init).
+    fn ensureBlitShader(self: *App) void {
+        if (self.blit_shader != null or self.effect_shader == null) return;
+        self.blit_shader = BlitShader.init() catch |err| {
+            std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
+            return;
+        };
+        if (self.blit_shader) |*bs| bs.bind();
+        // bind() leaves the blit program/VBO as current GL state; restore the
+        // effect program so per-frame uniform uploads hit the right program.
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
     }
 
     pub fn run(self: *App) !void {
@@ -617,13 +628,39 @@ pub const App = struct {
     }
 
     fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
-        if (scale <= 0.0 or scale > 4.0) {
-            dispatch.writeError(client_fd, "scale must be a positive number (max 4.0)");
+        // Mirror config validation for renderer.scale: 0.1–1.0, with the
+        // shared near-native rejection rule.
+        if (!std.math.isFinite(scale) or scale < 0.1 or scale > 1.0) {
+            dispatch.writeError(client_fd, "scale must be between 0.1 and 1.0");
+            return;
+        }
+        if (scale < 1.0 and scale >= config_mod.RENDERER_SCALE_NEAR_NATIVE_MIN) {
+            dispatch.writeError(client_fd, "scale values from 0.95 up to but not including 1.0 are too close to native; use a lower value or exactly 1.0");
             return;
         }
         self.renderer_scale = scale;
         for (self.surfaces.items) |s| {
             s.renderer_scale = scale;
+        }
+        // Apply immediately (create/resize/destroy offscreen FBOs) instead of
+        // waiting for the next configure event. No-op on the CPU path where
+        // renderer scale does not apply.
+        if (self.egl_ctx) |*ctx| {
+            if (scale < 1.0) {
+                // Shader compilation needs a current EGL context, which is
+                // not guaranteed at IPC-handling time.
+                for (self.surfaces.items) |s| {
+                    if (s.dead) continue;
+                    if (s.egl_surface) |*egl_surf| {
+                        if (egl_surf.makeCurrent(ctx)) break;
+                    }
+                }
+                self.ensureBlitShader();
+            }
+            const blit_available = self.blit_shader != null;
+            for (self.surfaces.items) |s| {
+                s.applyRendererScale(ctx, blit_available);
+            }
         }
         dispatch.writeOk(client_fd);
     }

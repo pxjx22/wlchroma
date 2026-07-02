@@ -283,6 +283,40 @@ pub const SurfaceState = struct {
         self.shm_effect = null;
     }
 
+    /// Apply the current renderer_scale immediately: create or resize the
+    /// offscreen FBO (scale < 1.0, blit shader available) or destroy it
+    /// (scale == 1.0). Called by the set-scale IPC handler so the change is
+    /// visible without waiting for the next configure event. Requires an
+    /// EGL surface; makes it current for the GL object work.
+    pub fn applyRendererScale(self: *SurfaceState, ctx: *const EglContext, blit_available: bool) void {
+        if (self.dead or !self.configured) return;
+        const egl_surf = if (self.egl_surface) |*e| e else return;
+        if (!egl_surf.makeCurrent(ctx)) {
+            std.debug.print("set-scale: makeCurrent failed on output {}, deferring to next configure\n", .{self.output.registry_name});
+            return;
+        }
+
+        if (self.renderer_scale < 1.0 and blit_available) {
+            const rw = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(self.pixel_w)) * self.renderer_scale)));
+            const rh = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(self.pixel_h)) * self.renderer_scale)));
+            if (self.offscreen) |*ofs| {
+                if (!ofs.resize(rw, rh)) {
+                    std.debug.print("set-scale: FBO incomplete after resize, disabling offscreen on output {}\n", .{self.output.registry_name});
+                    ofs.deinit();
+                    self.offscreen = null;
+                }
+            } else {
+                self.offscreen = Offscreen.init(rw, rh, self.upscale_filter) catch |err| blk: {
+                    std.debug.print("set-scale: Offscreen.init failed on output {}: {}, rendering at full resolution\n", .{ self.output.registry_name, err });
+                    break :blk null;
+                };
+            }
+        } else if (self.offscreen) |*ofs| {
+            ofs.deinit();
+            self.offscreen = null;
+        }
+    }
+
     pub fn forceCpuFallback(self: *SurfaceState) void {
         if (self.dead) return;
         const pw = self.pixel_w;

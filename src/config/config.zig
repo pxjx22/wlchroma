@@ -153,7 +153,10 @@ const ParseOptions = struct {
 };
 
 const MAX_SEEN_KEYS = 64;
-const RENDERER_SCALE_NEAR_NATIVE_MIN: f32 = 0.95;
+/// Scales in [this, 1.0) are rejected as visually indistinguishable from
+/// native while still paying the offscreen-FBO cost. Shared by config
+/// validation and the IPC set-scale handler so both enforce the same rule.
+pub const RENDERER_SCALE_NEAR_NATIVE_MIN: f32 = 0.95;
 
 const SeenNames = struct {
     buf: [MAX_SEEN_KEYS][]const u8,
