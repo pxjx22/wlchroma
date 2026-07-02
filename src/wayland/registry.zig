@@ -99,15 +99,22 @@ fn registryGlobalRemove(
     registry: ?*c.wl_registry,
     name: u32,
 ) callconv(.c) void {
-    _ = data;
     _ = registry;
-    // Hot-unplug handling is deferred. Full support would require:
-    //   1. Matching `name` back to the OutputInfo/SurfaceState that owns it
-    //   2. Tearing down the EGL surface, SHM pool, and layer surface
-    //   3. Removing the entry from the surfaces ArrayList (invalidating ptrs)
-    // Since this is a wallpaper daemon that typically runs for the session
-    // lifetime, logging and continuing is acceptable. The compositor will
-    // close the layer surface if the output goes away, triggering
-    // layerSurfaceClosed -> clean shutdown.
-    std.debug.print("registry: global {} removed (hot-unplug handling deferred)\n", .{name});
+    const self: *Registry = @ptrCast(@alignCast(data));
+    const outputs = self.outputs orelse return;
+
+    // Callbacks only record facts; the main loop's syncSurfaces() pass
+    // performs the actual surface/output teardown outside dispatch context.
+    for (outputs.items) |out| {
+        if (out.registry_name == name and !out.removed) {
+            out.removed = true;
+            std.debug.print("output removed: name={}{s}{s}\n", .{
+                name,
+                if (out.name.len > 0) " " else "",
+                out.name,
+            });
+            return;
+        }
+    }
+    // Not an output global (or already handled) — nothing to do.
 }

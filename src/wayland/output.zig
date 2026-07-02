@@ -21,7 +21,14 @@ pub const OutputInfo = struct {
 
     pub fn deinit(self: *OutputInfo) void {
         if (self.wl_output) |out| {
-            c.wl_output_release(out);
+            // wl_output.release exists from version 3; the registry binds
+            // @min(advertised, 3), so fall back to destroying the proxy
+            // client-side on v1/v2 compositors.
+            if (c.wl_output_get_version(out) >= 3) {
+                c.wl_output_release(out);
+            } else {
+                c.wl_output_destroy(out);
+            }
             self.wl_output = null;
         }
         if (self.name.len > 0) {

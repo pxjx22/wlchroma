@@ -166,11 +166,14 @@ pub const App = struct {
         };
     }
 
-    /// Reconcile the surface list with the current outputs list: create a
-    /// surface for every ready output that lacks one. Runs at startup and in
-    /// the poll loop after event dispatch — never inside a libwayland
-    /// callback (callbacks record facts; the loop acts on them).
+    /// Reconcile the surface list with the current outputs list: reap
+    /// surfaces whose output vanished (or that the compositor closed), then
+    /// create a surface for every ready output that lacks one. Runs at
+    /// startup and in the poll loop after event dispatch — never inside a
+    /// libwayland callback (callbacks record facts; the loop acts on them).
     fn syncSurfaces(self: *App) void {
+        self.reapSurfaces();
+
         for (self.outputs.items) |out| {
             if (!out.done or out.removed) continue;
             if (self.surfaceForOutput(out) != null) continue;
@@ -207,6 +210,39 @@ pub const App = struct {
         }
 
         self.ensureGpuPipeline();
+    }
+
+    /// Destroy surfaces that are dead (compositor closed the layer surface)
+    /// or whose output was removed from the registry, then free removed
+    /// outputs that no longer have a surface. The two removal channels can
+    /// arrive in either order; both funnel here and each object is freed
+    /// exactly once.
+    fn reapSurfaces(self: *App) void {
+        var i: usize = 0;
+        while (i < self.surfaces.items.len) {
+            const s = self.surfaces.items[i];
+            if (!s.dead and !s.output.removed) {
+                i += 1;
+                continue;
+            }
+            const reason: []const u8 = if (s.output.removed) "removed" else "closed";
+            std.debug.print("surface reaped for output {} (reason: {s})\n", .{ s.output.registry_name, reason });
+            s.deinit(self.display);
+            self.allocator.destroy(s);
+            _ = self.surfaces.swapRemove(i);
+        }
+
+        i = 0;
+        while (i < self.outputs.items.len) {
+            const out = self.outputs.items[i];
+            if (!out.removed or self.surfaceForOutput(out) != null) {
+                i += 1;
+                continue;
+            }
+            out.deinit();
+            self.allocator.destroy(out);
+            _ = self.outputs.swapRemove(i);
+        }
     }
 
     fn surfaceForOutput(self: *App, out: *const OutputInfo) ?*SurfaceState {
