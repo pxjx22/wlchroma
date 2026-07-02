@@ -252,6 +252,15 @@ pub const SurfaceState = struct {
             self.offscreen = null;
         }
         if (self.egl_surface) |*egl_surf| {
+            // If this surface is the thread's current draw surface, unbind
+            // before destroying it: a stale current binding could make
+            // makeCurrent's handle-equality fast path false-match a future
+            // surface if the driver reuses the handle.
+            if (self.egl_ctx) |ctx| {
+                if (c.eglGetCurrentSurface(c.EGL_DRAW) == egl_surf.egl_surface) {
+                    _ = c.eglMakeCurrent(ctx.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
+                }
+            }
             egl_surf.deinit();
             self.egl_surface = null;
         }

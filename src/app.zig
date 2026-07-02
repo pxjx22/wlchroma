@@ -262,6 +262,12 @@ pub const App = struct {
             }
             const reason: []const u8 = if (s.output.removed) "removed" else "closed";
             std.debug.print("surface reaped for output {} (reason: {s})\n", .{ s.output.registry_name, reason });
+            // Compositor-initiated closure is honored as output removal
+            // (runtime-behavior contract): without this, a closed-but-not-
+            // removed output would get a fresh surface next pass, churning
+            // create/close forever. If the output genuinely persists, the
+            // compositor re-announces it as a new global.
+            s.output.removed = true;
             s.deinit(self.display);
             self.allocator.destroy(s);
             _ = self.surfaces.swapRemove(i);
@@ -401,6 +407,10 @@ pub const App = struct {
             const prep = c.wl_display_prepare_read(self.display);
             if (prep != 0) {
                 _ = c.wl_display_dispatch_pending(self.display);
+                // Reconcile here too: otherwise output events dispatched on
+                // this path would wait for the next poll wake, which may be
+                // indefinite with the frame timer disarmed.
+                self.syncSurfaces();
                 continue;
             }
 
