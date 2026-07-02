@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const sys = @import("sys");
 
 /// Maximum path length for a Unix domain socket (sockaddr_un.sun_path is 108 bytes on Linux).
 const SOCK_PATH_MAX = 107;
@@ -18,8 +19,8 @@ pub const IpcServer = struct {
     /// Create the socket, unlink any stale file, bind, and listen.
     /// Returns error if $XDG_RUNTIME_DIR is unset/empty, the path is too long,
     /// or bind/listen fails. Caller degrades gracefully on error.
-    pub fn init() !IpcServer {
-        const runtime_dir = posix.getenv("XDG_RUNTIME_DIR") orelse
+    pub fn init(environ: std.process.Environ) !IpcServer {
+        const runtime_dir = environ.getPosix("XDG_RUNTIME_DIR") orelse
             return error.NoRuntimeDir;
         if (runtime_dir.len == 0) return error.NoRuntimeDir;
 
@@ -35,22 +36,22 @@ pub const IpcServer = struct {
         server.path_len = path.len;
 
         // Remove stale socket from a previous crash.
-        posix.unlink(path) catch |err| switch (err) {
+        sys.unlinkZ(path) catch |err| switch (err) {
             error.FileNotFound => {}, // expected — no stale socket
             else => std.debug.print("ipc: warning: unlink({s}) failed: {}\n", .{ path, err }),
         };
 
         // Create the listening socket.
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(fd);
+        const fd = try sys.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer sys.close(fd);
 
         var addr = std.mem.zeroes(posix.sockaddr.un);
         addr.family = posix.AF.UNIX;
         if (path.len >= addr.path.len) return error.PathTooLong;
         @memcpy(addr.path[0..path.len], path);
 
-        try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
-        try posix.listen(fd, 8);
+        try sys.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        try sys.listen(fd, 8);
 
         server.fd = fd;
         return server;
@@ -58,15 +59,15 @@ pub const IpcServer = struct {
 
     /// Close the listening socket and remove the socket file.
     pub fn deinit(self: *IpcServer) void {
-        posix.close(self.fd);
+        sys.close(self.fd);
         const path = self.path_buf[0..self.path_len :0];
-        posix.unlink(path) catch {};
+        sys.unlinkZ(path) catch {};
     }
 
     /// Accept a pending connection. Returns the client fd.
     /// The caller is responsible for closing the client fd.
     pub fn accept(self: *IpcServer) !posix.fd_t {
-        const client_fd = try posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC);
+        const client_fd = try sys.accept4(self.fd, posix.SOCK.CLOEXEC);
         // Set a 200 ms receive timeout so a slow/stalled client cannot block the render loop.
         const timeout = posix.timeval{ .sec = 0, .usec = 200_000 };
         posix.setsockopt(
@@ -106,10 +107,10 @@ pub const IpcServer = struct {
     /// Write `line` followed by a newline to `fd`. Errors are silently swallowed
     /// so a slow client cannot propagate an error into the render loop.
     pub fn writeLine(fd: posix.fd_t, line: []const u8) void {
-        var iov = [2]posix.iovec_const{
+        const iov = [2]posix.iovec_const{
             .{ .base = line.ptr, .len = line.len },
             .{ .base = "\n", .len = 1 },
         };
-        _ = posix.writev(fd, &iov) catch {};
+        _ = sys.writev(fd, &iov) catch {};
     }
 };

@@ -39,7 +39,7 @@ pub fn parseLine(line: []const u8) ParseError!IpcCommand {
     // Split into verb + optional argument.
     const space = std.mem.indexOfScalar(u8, trimmed, ' ');
     const verb = if (space) |s| trimmed[0..s] else trimmed;
-    const rest = if (space) |s| std.mem.trimLeft(u8, trimmed[s + 1 ..], &std.ascii.whitespace) else "";
+    const rest = if (space) |s| std.mem.trimStart(u8, trimmed[s + 1 ..], &std.ascii.whitespace) else "";
 
     if (std.mem.eql(u8, verb, "reload")) {
         return .reload;

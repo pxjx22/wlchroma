@@ -23,8 +23,7 @@ pub const EglSurface = struct {
         width: u32,
         height: u32,
     ) !EglSurface {
-        const egl_window = c.wl_egl_window_create(wl_surface, @intCast(width), @intCast(height))
-            orelse return error.EglWindowCreateFailed;
+        const egl_window = c.wl_egl_window_create(wl_surface, @intCast(width), @intCast(height)) orelse return error.EglWindowCreateFailed;
         errdefer c.wl_egl_window_destroy(egl_window);
 
         // EGLNativeWindowType is c_ulong on X11/Wayland-EGL platforms,

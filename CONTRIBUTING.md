@@ -17,7 +17,7 @@
 
 ## Prerequisites
 
-- Zig `0.15.2`
+- Zig `0.16.0`
 - `wayland-scanner`
 - Development libraries for `wayland-client`, `wayland-egl`, `EGL`, and `GLESv2`
 

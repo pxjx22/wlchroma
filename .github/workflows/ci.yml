@@ -13,7 +13,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libegl1-mesa-dev libgles2-mesa-dev libwayland-bin libwayland-dev

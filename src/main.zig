@@ -2,19 +2,19 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const config_mod = @import("config/config.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    // init.gpa is a leak-checking debug allocator in Debug builds and the
+    // libc allocator in release builds.
+    const allocator = init.gpa;
 
-    const config_path = parseArgs();
+    const config_path = parseArgs(init.minimal.args);
 
-    const load_result = config_mod.loadConfigFull(allocator, config_path) catch |err| {
+    const load_result = config_mod.loadConfigFull(allocator, init.io, init.minimal.environ, config_path) catch |err| {
         std.debug.print("fatal: failed to load config: {}\n", .{err});
         return err;
     };
 
-    var app = App.init(allocator, load_result.config, load_result.palettes, config_path) catch |err| {
+    var app = App.init(allocator, init.io, init.minimal.environ, load_result.config, load_result.palettes, config_path) catch |err| {
         allocator.free(load_result.palettes);
         return err;
     };
@@ -22,8 +22,10 @@ pub fn main() !void {
     try app.run();
 }
 
-fn parseArgs() ?[]const u8 {
-    var args = std.process.args();
+fn parseArgs(args_source: std.process.Args) ?[]const u8 {
+    // Posix iterator yields slices of static argv memory, so the returned
+    // path remains valid for the process lifetime.
+    var args = args_source.iterate();
     _ = args.next(); // skip argv[0]
 
     const first = args.next() orelse return null;

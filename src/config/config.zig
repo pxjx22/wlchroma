@@ -67,32 +67,26 @@ pub fn defaultConfig() AppConfig {
 
 const DEFAULT_FPS: u32 = 15;
 
+/// Maximum accepted config file size in bytes.
+const MAX_CONFIG_SIZE = 64 * 1024;
+
 /// Load config and return both AppConfig and named palettes.
 /// The returned palettes slice is heap-allocated; caller must free it.
-pub fn loadConfigFull(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !LoadResult {
+pub fn loadConfigFull(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+    explicit_path: ?[]const u8,
+) !LoadResult {
     if (explicit_path) |ep| {
-        return loadConfigFullFromExplicitPath(allocator, ep);
+        return loadConfigFullFromExplicitPath(allocator, io, ep);
     }
-    return loadConfigFullFromDefaults(allocator);
+    return loadConfigFullFromDefaults(allocator, io, environ);
 }
 
-/// Legacy entry point (no palettes). Still used by existing tests.
-pub fn loadConfig(allocator: std.mem.Allocator, explicit_path: ?[]const u8) !AppConfig {
-    const result = try loadConfigFull(allocator, explicit_path);
-    allocator.free(result.palettes);
-    return result.config;
-}
-
-fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, path: []const u8) !LoadResult {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        std.debug.print("config: failed to open {s}: {}\n", .{ path, err });
-        return error.ConfigFileError;
-    };
-    defer file.close();
-
-    const max_size = 64 * 1024;
-    const content = file.readToEndAlloc(allocator, max_size) catch |err| {
-        std.debug.print("config: failed to read config file: {}\n", .{err});
+fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !LoadResult {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(MAX_CONFIG_SIZE)) catch |err| {
+        std.debug.print("config: failed to read {s}: {}\n", .{ path, err });
         return error.ConfigFileError;
     };
     defer allocator.free(content);
@@ -100,8 +94,8 @@ fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, path: []const u8
     return parseAndValidateExistingConfigFull(allocator, content);
 }
 
-fn loadConfigFullFromDefaults(allocator: std.mem.Allocator) !LoadResult {
-    const path = resolveConfigPath(allocator) catch |err| {
+fn loadConfigFullFromDefaults(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) !LoadResult {
+    const path = resolveConfigPath(allocator, environ) catch |err| {
         switch (err) {
             error.OutOfMemory => return err,
             else => {
@@ -112,24 +106,17 @@ fn loadConfigFullFromDefaults(allocator: std.mem.Allocator) !LoadResult {
     };
     defer if (path.allocated) allocator.free(path.slice);
 
-    const file = std.fs.openFileAbsolute(path.slice, .{}) catch |err| {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path.slice, allocator, .limited(MAX_CONFIG_SIZE)) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 std.debug.print("config: no config file found at {s}, using defaults\n", .{path.slice});
                 return LoadResult{ .config = defaultConfig(), .palettes = try allocator.alloc(NamedPalette, 0) };
             },
             else => {
-                std.debug.print("config: failed to open {s}: {}\n", .{ path.slice, err });
+                std.debug.print("config: failed to read {s}: {}\n", .{ path.slice, err });
                 return error.ConfigFileError;
             },
         }
-    };
-    defer file.close();
-
-    const max_size = 64 * 1024;
-    const content = file.readToEndAlloc(allocator, max_size) catch |err| {
-        std.debug.print("config: failed to read config file: {}\n", .{err});
-        return error.ConfigFileError;
     };
     defer allocator.free(content);
 
@@ -141,9 +128,9 @@ const ConfigPath = struct {
     allocated: bool,
 };
 
-fn resolveConfigPath(allocator: std.mem.Allocator) !ConfigPath {
+fn resolveConfigPath(allocator: std.mem.Allocator, environ: std.process.Environ) !ConfigPath {
     // Try XDG_CONFIG_HOME first
-    if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+    if (environ.getPosix("XDG_CONFIG_HOME")) |xdg| {
         if (xdg.len > 0) {
             const path = try std.fmt.allocPrint(allocator, "{s}/wlchroma/config.toml", .{xdg});
             return .{ .slice = path, .allocated = true };
@@ -151,7 +138,7 @@ fn resolveConfigPath(allocator: std.mem.Allocator) !ConfigPath {
     }
 
     // Fall back to $HOME/.config
-    if (std.posix.getenv("HOME")) |home| {
+    if (environ.getPosix("HOME")) |home| {
         if (home.len > 0) {
             const path = try std.fmt.allocPrint(allocator, "{s}/.config/wlchroma/config.toml", .{home});
             return .{ .slice = path, .allocated = true };
@@ -621,9 +608,9 @@ const KeyValue = struct {
 fn parseKeyValue(line: []const u8) ?KeyValue {
     const eq = std.mem.indexOfScalar(u8, line, '=') orelse return null;
     if (eq == 0) return null;
-    const key = std.mem.trimRight(u8, line[0..eq], &std.ascii.whitespace);
+    const key = std.mem.trimEnd(u8, line[0..eq], &std.ascii.whitespace);
     if (key.len == 0) return null;
-    const value = std.mem.trimLeft(u8, line[eq + 1 ..], &std.ascii.whitespace);
+    const value = std.mem.trimStart(u8, line[eq + 1 ..], &std.ascii.whitespace);
     return .{ .key = key, .value = value };
 }
 
@@ -654,7 +641,7 @@ fn stripComment(line: []const u8) []const u8 {
         if (ch == '"') {
             in_quote = !in_quote;
         } else if (ch == '#' and !in_quote) {
-            return std.mem.trimRight(u8, line[0..i], &std.ascii.whitespace);
+            return std.mem.trimEnd(u8, line[0..i], &std.ascii.whitespace);
         }
     }
     return line;

@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("../wl.zig").c;
 const posix = std.posix;
+const sys = @import("sys");
 
 pub const ShmPool = struct {
     pool: ?*c.wl_shm_pool,
@@ -60,14 +61,14 @@ pub const ShmPool = struct {
         _ = stride;
 
         const fd = try posix.memfd_create("wlchroma-shm", 1);
-        errdefer posix.close(fd);
+        errdefer sys.close(fd);
 
-        try posix.ftruncate(fd, @intCast(total_size));
+        try sys.ftruncate(fd, total_size);
 
         const mmap_result = try posix.mmap(
             null,
             total_size,
-            posix.PROT.READ | posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             fd,
             0,
@@ -114,7 +115,7 @@ pub const ShmPool = struct {
         if (self.pool) |p| c.wl_shm_pool_destroy(p);
         const total = self.buf_size * 2;
         posix.munmap(@as([*]align(std.heap.page_size_min) u8, @alignCast(self.mmap_ptr))[0..total]);
-        posix.close(self.fd);
+        sys.close(self.fd);
     }
 
     /// Returns index of a free buffer, or null if both are busy.
@@ -139,4 +140,3 @@ pub const ShmPool = struct {
         return self.buffers[idx].?;
     }
 };
-

@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 
 // Maximum path length for a Unix domain socket.
 const SOCK_PATH_MAX = 107;
@@ -11,8 +12,9 @@ const CMD_MAX = 256;
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var sent: usize = 0;
     while (sent < data.len) {
-        const n = posix.write(fd, data[sent..]) catch return;
-        sent += n;
+        const rc = linux.write(fd, data[sent..].ptr, data.len - sent);
+        if (linux.errno(rc) != .SUCCESS) return;
+        sent += rc;
     }
 }
 
@@ -22,13 +24,13 @@ fn writeErr(comptime fmt: []const u8, args: anytype) void {
     writeAll(2, s);
 }
 
-pub fn main() void {
-    run() catch {};
+pub fn main(init: std.process.Init.Minimal) void {
+    run(init.args, init.environ) catch {};
 }
 
-fn run() !void {
+fn run(args_source: std.process.Args, environ: std.process.Environ) !void {
     // --- T023: argument parsing ---
-    var args = std.process.args();
+    var args = args_source.iterate();
     _ = args.next(); // skip argv[0]
 
     // Build the command line from all remaining args, space-separated.
@@ -80,7 +82,7 @@ fn run() !void {
     const cmd_line = cmd_buf[0..cmd_len];
 
     // --- Resolve socket path from $XDG_RUNTIME_DIR ---
-    const runtime_dir = posix.getenv("XDG_RUNTIME_DIR") orelse {
+    const runtime_dir = environ.getPosix("XDG_RUNTIME_DIR") orelse {
         writeErr("error: $XDG_RUNTIME_DIR is not set\n", .{});
         std.process.exit(1);
     };
@@ -91,27 +93,29 @@ fn run() !void {
     };
 
     // --- T024: connect, send, receive ---
-    const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+    const socket_rc = linux.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    if (linux.errno(socket_rc) != .SUCCESS) {
         writeErr("error: failed to create socket\n", .{});
         std.process.exit(1);
-    };
-    defer posix.close(fd);
+    }
+    const fd: posix.fd_t = @intCast(socket_rc);
+    defer _ = linux.close(fd);
 
     var addr = std.mem.zeroes(posix.sockaddr.un);
     addr.family = posix.AF.UNIX;
     @memcpy(addr.path[0..sock_path.len], sock_path);
 
-    posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| {
-        switch (err) {
-            error.FileNotFound, error.ConnectionRefused => {
-                writeErr("error: wlchroma is not running\n", .{});
-            },
-            else => {
-                writeErr("error: connect failed: {}\n", .{err});
-            },
-        }
-        std.process.exit(1);
-    };
+    switch (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)))) {
+        .SUCCESS => {},
+        .NOENT, .CONNREFUSED => {
+            writeErr("error: wlchroma is not running\n", .{});
+            std.process.exit(1);
+        },
+        else => |e| {
+            writeErr("error: connect failed: {t}\n", .{e});
+            std.process.exit(1);
+        },
+    }
 
     // Send command line (includes trailing newline).
     writeAll(fd, cmd_line);

@@ -10,8 +10,8 @@ pub const GpuEffectState = struct {
     palette: [3]Rgb,
 
     pub fn init(frame_advance_ms: u32, speed: f32, palette: [3]Rgb) GpuEffectState {
-        const ts = std.time.milliTimestamp();
-        const seed: u64 = @bitCast(ts);
+        // Monotonic clock is fine as a seed source; only per-run variety matters.
+        const seed: u64 = @import("sys").monotonicNs();
         var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
         return .{

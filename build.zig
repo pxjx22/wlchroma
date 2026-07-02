@@ -30,6 +30,13 @@ pub fn build(b: *std.Build) void {
     xdg_scan_src.addFileArg(xdg_xml);
     const xdg_src = xdg_scan_src.addOutputFileArg("xdg-shell-client-protocol.c");
 
+    // Raw-syscall shim shared by the daemon and the IPC test modules.
+    const sys_mod = b.createModule(.{
+        .root_source_file = b.path("src/sys.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- wlchroma (wallpaper daemon) ---
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -37,6 +44,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    mod.addImport("sys", sys_mod);
 
     mod.addCSourceFile(.{ .file = src, .flags = &.{} });
     mod.addCSourceFile(.{ .file = xdg_src, .flags = &.{} });
@@ -81,19 +89,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // IPC protocol tests
+    // IPC protocol tests. dispatch.zig imports server.zig by relative path,
+    // and server.zig needs the "sys" module.
     const ipc_dispatch_mod = b.createModule(.{
         .root_source_file = b.path("src/ipc/dispatch.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // dispatch depends on server for IpcServer.writeLine
-    const ipc_server_mod = b.createModule(.{
-        .root_source_file = b.path("src/ipc/server.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ipc_dispatch_mod.addImport("server", ipc_server_mod);
+    ipc_dispatch_mod.addImport("sys", sys_mod);
 
     const ipc_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/ipc/protocol_test.zig"),

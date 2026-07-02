@@ -15,7 +15,7 @@ Animated, palette-driven wallpaper for Linux Wayland desktops. Renders shader ef
 
 - Linux with a Wayland session
 - A compositor exposing `zwlr_layer_shell_v1` (`wlr-layer-shell`)
-- Zig `0.15.2`
+- Zig `0.16.0`
 - `wayland-scanner`
 - Development libraries: `wayland-client`, `wayland-egl`, `EGL`, `GLESv2`
 

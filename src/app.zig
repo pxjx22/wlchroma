@@ -20,9 +20,14 @@ const UpscaleFilter = config_mod.UpscaleFilter;
 const server_mod = @import("ipc/server.zig");
 const IpcServer = server_mod.IpcServer;
 const dispatch = @import("ipc/dispatch.zig");
+const sys = @import("sys");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
+    /// Io interface and environment from std.process.Init, retained for
+    /// config reloads (file reads and XDG path resolution).
+    io: std.Io,
+    environ: std.process.Environ,
     display: *c.wl_display,
     registry: Registry,
     outputs: std.ArrayList(OutputInfo),
@@ -50,6 +55,8 @@ pub const App = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
+        environ: std.process.Environ,
         config: AppConfig,
         palettes: []NamedPalette,
         config_path: ?[]const u8,
@@ -61,8 +68,8 @@ pub const App = struct {
         var effect = Effect.init(&config);
 
         // Create the timerfd here so it is accessible as a field for set_fps.
-        const tfd = try posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
-        errdefer posix.close(tfd);
+        const tfd = try sys.timerfdCreate(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer sys.close(tfd);
 
         // Block SIGTERM and capture it via signalfd so the poll loop handles it
         // cleanly (triggers deinit, removes socket file). Without this, SIGTERM
@@ -72,14 +79,16 @@ pub const App = struct {
         posix.sigprocmask(posix.SIG.BLOCK, &sig_mask, null);
         const sig_fd_flags: u32 = @bitCast(linux.O{ .NONBLOCK = true, .CLOEXEC = true });
         const sig_fd = try posix.signalfd(-1, &sig_mask, sig_fd_flags);
-        errdefer posix.close(sig_fd);
+        errdefer sys.close(sig_fd);
 
         var app = App{
             .allocator = allocator,
+            .io = io,
+            .environ = environ,
             .display = display,
             .registry = Registry{},
-            .outputs = .{},
-            .surfaces = .{},
+            .outputs = .empty,
+            .surfaces = .empty,
             .effect = effect,
             .egl_ctx = null,
             .effect_shader = null,
@@ -154,7 +163,7 @@ pub const App = struct {
         }
 
         // Start IPC server. Failure is non-fatal (Constitution III: graceful degradation).
-        app.ipc_server = IpcServer.init() catch |err| blk: {
+        app.ipc_server = IpcServer.init(environ) catch |err| blk: {
             std.debug.print("ipc: failed to start IPC server: {} — continuing without IPC\n", .{err});
             break :blk null;
         };
@@ -207,13 +216,13 @@ pub const App = struct {
                         std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
                         continue;
                     }
-                    const shader_init_start_ns: u64 = if (perf_logs_enabled) @intCast(std.time.nanoTimestamp()) else 0;
+                    const shader_init_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
                     self.effect_shader = EffectShader.init(&self.effect) catch |err| blk: {
                         std.debug.print("shader init failed: {} -- using CPU fallback on this session\n", .{err});
                         break :blk null;
                     };
                     if (perf_logs_enabled) {
-                        const shader_init_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+                        const shader_init_end_ns: u64 = sys.monotonicNs();
                         const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
                         std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
                     }
@@ -263,7 +272,7 @@ pub const App = struct {
             .it_value = .{ .sec = 0, .nsec = timer_ns },
             .it_interval = .{ .sec = 0, .nsec = timer_ns },
         };
-        try posix.timerfd_settime(tfd, .{}, &interval, null);
+        try sys.timerfdSettime(tfd, &interval);
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
         const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
@@ -327,7 +336,7 @@ pub const App = struct {
                 var buf: [8]u8 = undefined;
                 _ = posix.read(tfd, &buf) catch {};
 
-                const render_tick_start_ns: u64 = if (perf_logs_enabled) @intCast(std.time.nanoTimestamp()) else 0;
+                const render_tick_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
 
                 const sh_ptr: ?*const EffectShader = if (self.effect_shader) |*sh| sh else null;
                 const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
@@ -335,7 +344,7 @@ pub const App = struct {
                     s.renderTick(sh_ptr, blit_ptr);
                 }
                 if (perf_logs_enabled) {
-                    const render_tick_end_ns: u64 = @intCast(std.time.nanoTimestamp());
+                    const render_tick_end_ns: u64 = sys.monotonicNs();
                     render_tick_count += 1;
                     render_tick_total_ns += render_tick_end_ns - render_tick_start_ns;
                     if (render_tick_count % perf_log_interval == 0) {
@@ -382,7 +391,7 @@ pub const App = struct {
             std.debug.print("ipc: accept failed: {}\n", .{err});
             return;
         };
-        defer posix.close(client_fd);
+        defer sys.close(client_fd);
 
         var line_buf: [server_mod.LINE_MAX + 1]u8 = undefined;
         const line = IpcServer.readLine(client_fd, &line_buf) catch |err| {
@@ -487,7 +496,7 @@ pub const App = struct {
             .it_value = .{ .sec = 0, .nsec = interval_ns },
             .it_interval = .{ .sec = 0, .nsec = interval_ns },
         };
-        posix.timerfd_settime(self.tfd, .{}, &interval, null) catch |err| {
+        sys.timerfdSettime(self.tfd, &interval) catch |err| {
             var buf: [64]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
             dispatch.writeError(client_fd, msg);
@@ -538,7 +547,7 @@ pub const App = struct {
             dispatch.writeError(client_fd, "config file not found");
             return;
         };
-        const load_result = config_mod.loadConfigFull(self.allocator, path) catch |err| {
+        const load_result = config_mod.loadConfigFull(self.allocator, self.io, self.environ, path) catch |err| {
             var buf: [128]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "config parse failed: {}", .{err}) catch "config parse failed";
             dispatch.writeError(client_fd, msg);
@@ -551,7 +560,7 @@ pub const App = struct {
             .it_value = .{ .sec = 0, .nsec = new_interval_ns },
             .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
         };
-        posix.timerfd_settime(self.tfd, .{}, &new_interval, null) catch {};
+        sys.timerfdSettime(self.tfd, &new_interval) catch {};
         self.frame_interval_ns = new_interval_ns;
         // 2. renderer_scale
         self.renderer_scale = load_result.config.renderer_scale;
@@ -573,8 +582,8 @@ pub const App = struct {
         if (self.ipc_server) |*srv| srv.deinit();
         self.ipc_server = null;
         self.allocator.free(self.palettes);
-        posix.close(self.tfd);
-        posix.close(self.sig_fd);
+        sys.close(self.tfd);
+        sys.close(self.sig_fd);
 
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
