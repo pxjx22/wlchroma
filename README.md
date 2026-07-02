@@ -9,7 +9,7 @@ Animated, palette-driven wallpaper for Linux Wayland desktops. Renders shader ef
 - Runs on compositors that expose `zwlr_layer_shell_v1` (`wlr-layer-shell`)
 - Falls back to a CPU/SHM path when EGL/GPU rendering is unavailable
 - Controllable at runtime via `wlchroma-ctl` or direct socket scripting
-- Multi-monitor support (all outputs share one global config)
+- Multi-monitor support with hotplug: monitors connected or disconnected at runtime gain/lose their wallpaper automatically (all outputs share one global config)
 
 ## Requirements
 
@@ -207,12 +207,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now wlchroma.service
 ```
 
+## Multi-Monitor and Hotplug
+
+- Monitors connected while `wlchroma` is running get the wallpaper automatically within a couple of seconds — no restart needed. New monitors use the current runtime state (including palettes or fps set via `wlchroma-ctl`).
+- Disconnected monitors are cleaned up fully; repeated plug/unplug cycles (docks, TVs) do not leak resources.
+- If every monitor disappears (undocking, lid close), `wlchroma` keeps running at ~0% CPU with `wlchroma-ctl` still responsive, and resumes rendering when a monitor returns. It exits only on SIGTERM, `wlchroma-ctl stop`, or compositor shutdown.
+- Resolution/mode changes resize the wallpaper in place.
+
 ## Limitations
 
 - Linux Wayland only — no X11 support.
 - Requires `zwlr_layer_shell_v1` from the compositor.
 - All outputs share one global config — no per-output effect or palette selection.
-- Outputs added after startup do not receive a wallpaper surface until restart.
 
 ## Troubleshooting
 
