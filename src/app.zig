@@ -38,6 +38,9 @@ pub const App = struct {
     egl_ctx: ?EglContext,
     effect_shader: ?EffectShader,
     blit_shader: ?BlitShader,
+    /// Set when GPU pipeline init failed permanently (shader compile/link or
+    /// no surface could be made current); prevents retrying every tick.
+    gpu_pipeline_failed: bool,
     running: bool,
     frame_interval_ns: u32,
     renderer_scale: f32,
@@ -95,6 +98,7 @@ pub const App = struct {
             .egl_ctx = null,
             .effect_shader = null,
             .blit_shader = null,
+            .gpu_pipeline_failed = false,
             .running = true,
             .frame_interval_ns = config.frame_interval_ns,
             .renderer_scale = config.renderer_scale,
@@ -162,16 +166,16 @@ pub const App = struct {
         };
     }
 
-    pub fn run(self: *App) !void {
-        const perf_logs_enabled = builtin.mode == .Debug;
-        const perf_log_interval: u64 = 120;
-        var render_tick_count: u64 = 0;
-        var render_tick_total_ns: u64 = 0;
-
+    /// Reconcile the surface list with the current outputs list: create a
+    /// surface for every ready output that lacks one. Runs at startup and in
+    /// the poll loop after event dispatch — never inside a libwayland
+    /// callback (callbacks record facts; the loop acts on them).
+    fn syncSurfaces(self: *App) void {
         for (self.outputs.items) |out| {
-            if (!out.done) continue;
+            if (!out.done or out.removed) continue;
+            if (self.surfaceForOutput(out) != null) continue;
 
-            const surface_state = try SurfaceState.create(
+            const surface_state = SurfaceState.create(
                 self.allocator,
                 self.registry.compositor.?,
                 self.registry.shm.?,
@@ -183,66 +187,120 @@ pub const App = struct {
                 if (self.egl_ctx) |*ctx| ctx else null,
                 self.renderer_scale,
                 self.upscale_filter,
-            );
-            try self.surfaces.append(self.allocator, surface_state);
+            ) catch |err| {
+                std.debug.print("surface create failed for output {}: {} — skipping this output\n", .{ out.registry_name, err });
+                continue;
+            };
+            self.surfaces.append(self.allocator, surface_state) catch |err| {
+                std.debug.print("surface list append failed for output {}: {} — skipping this output\n", .{ out.registry_name, err });
+                surface_state.deinit(self.display);
+                self.allocator.destroy(surface_state);
+                continue;
+            };
+            std.debug.print("surface created for output {} ({}x{}{s}{s})\n", .{
+                out.registry_name,
+                out.width,
+                out.height,
+                if (out.name.len > 0) " " else "",
+                out.name,
+            });
         }
 
-        // Roundtrip to trigger configure events
-        if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
+        self.ensureGpuPipeline();
+    }
 
-        // Initialize GLES2 effect shader using the first available EGL surface.
-        if (self.egl_ctx) |*ctx| {
-            var shader_ready = false;
-            for (self.surfaces.items) |s| {
-                if (s.egl_surface) |*egl_surf| {
-                    if (!egl_surf.makeCurrent(ctx)) {
-                        std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
-                        continue;
-                    }
-                    const shader_init_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
-                    self.effect_shader = EffectShader.init(&self.effect) catch |err| blk: {
-                        std.debug.print("shader init failed: {} -- using CPU fallback on this session\n", .{err});
+    fn surfaceForOutput(self: *App, out: *const OutputInfo) ?*SurfaceState {
+        for (self.surfaces.items) |s| {
+            if (s.output == out) return s;
+        }
+        return null;
+    }
+
+    /// Initialize the GPU pipeline (effect shader + optional blit shader)
+    /// once an EGL surface is available. Lazy so it serves both normal
+    /// startup and the first output arriving after a zero-output start.
+    /// One-shot on failure: a compile/link error or a pass where EGL
+    /// surfaces exist but none can be made current falls back to the CPU
+    /// path for the session (matches pre-hotplug semantics, no per-tick
+    /// retry or log spam).
+    fn ensureGpuPipeline(self: *App) void {
+        const ctx = if (self.egl_ctx) |*p| p else return;
+        if (self.effect_shader != null or self.gpu_pipeline_failed) return;
+
+        const perf_logs_enabled = builtin.mode == .Debug;
+        var attempted = false;
+
+        for (self.surfaces.items) |s| {
+            if (s.egl_surface) |*egl_surf| {
+                attempted = true;
+                if (!egl_surf.makeCurrent(ctx)) {
+                    std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
+                    continue;
+                }
+                const shader_init_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
+                self.effect_shader = EffectShader.init(&self.effect) catch |err| blk: {
+                    std.debug.print("shader init failed: {} -- using CPU fallback on this session\n", .{err});
+                    break :blk null;
+                };
+                if (self.effect_shader == null) {
+                    self.gpu_pipeline_failed = true;
+                    if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
+                    return;
+                }
+                if (perf_logs_enabled) {
+                    const shader_init_end_ns: u64 = sys.monotonicNs();
+                    const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
+                    std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
+                }
+                // Bind invariant GL state once -- program, VBO, vertex layout,
+                // and effect-specific static data (palette / phase).
+                if (self.effect_shader) |*sh| sh.bind(&self.effect);
+
+                // Initialize blit shader for offscreen upscale pass.
+                if (self.renderer_scale < 1.0) {
+                    self.blit_shader = BlitShader.init() catch |err| blk: {
+                        std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
                         break :blk null;
                     };
-                    if (perf_logs_enabled) {
-                        const shader_init_end_ns: u64 = sys.monotonicNs();
-                        const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
-                        std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
-                    }
-                    // Bind invariant GL state once -- program, VBO, vertex layout,
-                    // and effect-specific static data (palette / phase).
-                    if (self.effect_shader) |*sh| sh.bind(&self.effect);
-
-                    // Initialize blit shader for offscreen upscale pass.
-                    if (self.renderer_scale < 1.0) {
-                        self.blit_shader = BlitShader.init() catch |err| blk: {
-                            std.debug.print("BlitShader.init failed: {} -- offscreen rendering disabled\n", .{err});
-                            break :blk null;
-                        };
-                        if (self.blit_shader) |*bs| {
-                            bs.bind();
-                        } else {
-                            // Blit shader unavailable: tear down all offscreen FBOs.
-                            for (self.surfaces.items) |surf| {
-                                if (surf.offscreen) |*ofs| {
-                                    ofs.deinit();
-                                    surf.offscreen = null;
-                                }
+                    if (self.blit_shader) |*bs| {
+                        bs.bind();
+                    } else {
+                        // Blit shader unavailable: tear down all offscreen FBOs.
+                        for (self.surfaces.items) |surf| {
+                            if (surf.offscreen) |*ofs| {
+                                ofs.deinit();
+                                surf.offscreen = null;
                             }
                         }
                     }
-
-                    shader_ready = true;
-                    break;
                 }
-            }
-            if (!shader_ready) {
-                std.debug.print("warning: no EGL surface could be made current; using CPU fallback on this session\n", .{});
-            }
-            if (!shader_ready and self.effect.isGpuOnly()) {
-                self.forceCpuFallbackForGpuOnly();
+                return;
             }
         }
+
+        if (attempted) {
+            // EGL surfaces exist but none could be made current.
+            std.debug.print("warning: no EGL surface could be made current; using CPU fallback on this session\n", .{});
+            self.gpu_pipeline_failed = true;
+            if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
+        }
+        // else: no EGL surface yet — try again on a later sync pass.
+    }
+
+    pub fn run(self: *App) !void {
+        const perf_logs_enabled = builtin.mode == .Debug;
+        const perf_log_interval: u64 = 120;
+        var render_tick_count: u64 = 0;
+        var render_tick_total_ns: u64 = 0;
+
+        // Create surfaces for outputs known at startup.
+        self.syncSurfaces();
+
+        // Roundtrip to deliver the configure events (EGL surfaces are created
+        // in the configure handler), then sync again so the GPU pipeline is
+        // ready before the first timer tick.
+        if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
+        self.syncSurfaces();
 
         // --- poll+timerfd main loop ---
         // tfd was created in App.init and stored as self.tfd.
@@ -314,6 +372,9 @@ pub const App = struct {
             }
 
             _ = c.wl_display_dispatch_pending(self.display);
+
+            // Reconcile surfaces with outputs that appeared in this batch.
+            self.syncSurfaces();
 
             if (fds[1].revents & linux.POLL.IN != 0) {
                 var buf: [8]u8 = undefined;

@@ -81,6 +81,18 @@ fn outputDone(
 ) callconv(.c) void {
     _ = wl_output;
     const self: *OutputInfo = @ptrCast(@alignCast(data));
+    // done also fires after later atomic updates (e.g. mode changes);
+    // only the first one means "output added".
+    if (!self.done) {
+        std.debug.print("output added: name={} {}x{}@{}mHz{s}{s}\n", .{
+            self.registry_name,
+            self.width,
+            self.height,
+            self.refresh_mhz,
+            if (self.name.len > 0) " " else "",
+            self.name,
+        });
+    }
     self.done = true;
 }
 
