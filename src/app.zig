@@ -30,8 +30,10 @@ pub const App = struct {
     environ: std.process.Environ,
     display: *c.wl_display,
     registry: Registry,
-    outputs: std.ArrayList(OutputInfo),
-    surfaces: std.ArrayList(SurfaceState),
+    /// Heap-allocated per-object so addresses handed to libwayland as
+    /// listener userdata stay valid regardless of list growth or removal.
+    outputs: std.ArrayList(*OutputInfo),
+    surfaces: std.ArrayList(*SurfaceState),
     effect: Effect,
     egl_ctx: ?EglContext,
     effect_shader: ?EffectShader,
@@ -65,7 +67,7 @@ pub const App = struct {
         errdefer c.wl_display_disconnect(display);
 
         // Build effect from config first (before EGL check).
-        var effect = Effect.init(&config);
+        const effect = Effect.init(&config);
 
         // Create the timerfd here so it is accessible as a field for set_fps.
         const tfd = try sys.timerfdCreate(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
@@ -81,7 +83,7 @@ pub const App = struct {
         const sig_fd = try posix.signalfd(-1, &sig_mask, sig_fd_flags);
         errdefer sys.close(sig_fd);
 
-        var app = App{
+        const app = App{
             .allocator = allocator,
             .io = io,
             .environ = environ,
@@ -105,70 +107,59 @@ pub const App = struct {
             .active_palette_name_buf = std.mem.zeroes([64]u8),
             .active_palette_name_len = 0,
         };
-        errdefer app.registry.deinit();
-        errdefer {
-            for (app.outputs.items) |*out| out.deinit();
-            app.outputs.deinit(allocator);
-        }
-        errdefer if (app.egl_ctx) |*ctx| ctx.deinit();
+        return app;
+    }
 
-        try app.registry.bind(display, &app.outputs, allocator);
+    /// Second init phase. MUST be called after the App value rests at its
+    /// final address (i.e. in main's stack frame): the registry listener
+    /// stores pointers into this App as userdata, and init() returns by
+    /// value, so registering listeners inside init() would leave libwayland
+    /// pointing into a dead stack frame on every post-startup event.
+    pub fn setup(self: *App) !void {
+        try self.registry.bind(self.display, &self.outputs, self.allocator);
 
-        // Pre-reserve capacity so that appends from registryGlobal (both
-        // during the startup roundtrip and from runtime hotplug) never
-        // reallocate the backing array.
-        const MAX_OUTPUTS = 32;
-        try app.outputs.ensureTotalCapacity(allocator, MAX_OUTPUTS);
-
-        // 1st roundtrip: bind all globals (outputs appended to ArrayList).
-        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
+        // 1st roundtrip: bind all globals (outputs recorded by the registry).
+        if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
 
         // 2nd roundtrip: collect all output done events
-        if (c.wl_display_roundtrip(display) < 0) return error.RoundtripFailed;
+        if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
 
         std.debug.print("bound: wl_compositor={} wl_shm={} zwlr_layer_shell_v1={}\n", .{
-            app.registry.compositor != null,
-            app.registry.shm != null,
-            app.registry.layer_shell != null,
+            self.registry.compositor != null,
+            self.registry.shm != null,
+            self.registry.layer_shell != null,
         });
 
-        app.egl_ctx = EglContext.init(display) catch |err| blk: {
+        self.egl_ctx = EglContext.init(self.display) catch |err| blk: {
             std.debug.print("EGL init failed: {}, falling back to CPU path\n", .{err});
             break :blk null;
         };
 
         // GPU-only effect fallback: if EGL is unavailable and the selected
         // effect has no CPU path, override to colormix on the SHM path.
-        if (app.egl_ctx == null and app.effect.isGpuOnly()) {
-            const name = @tagName(config.effect_type);
-            std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{name});
-            effect = Effect{ .colormix = ColormixRenderer.init(
-                config.palette[0],
-                config.palette[1],
-                config.palette[2],
-                config.frame_advance_ms,
-                config.speed,
+        if (self.egl_ctx == null and self.effect.isGpuOnly()) {
+            std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
+            const colors = self.effect.gpuPalette().?;
+            const frame_advance_ms = self.effect.frameAdvanceMs();
+            const speed = self.effect.speed();
+            self.effect = Effect{ .colormix = ColormixRenderer.init(
+                colors[0],
+                colors[1],
+                colors[2],
+                frame_advance_ms,
+                speed,
             ) };
-            app.effect = effect;
         }
 
-        if (app.registry.compositor == null) return error.MissingCompositor;
-        if (app.registry.shm == null) return error.MissingShm;
-        if (app.registry.layer_shell == null) return error.MissingLayerShell;
-
-        for (app.outputs.items) |*out| {
-            if (out.done) {
-                std.debug.print("output: {s} {}x{} refresh={}mHz\n", .{ out.name, out.width, out.height, out.refresh_mhz });
-            }
-        }
+        if (self.registry.compositor == null) return error.MissingCompositor;
+        if (self.registry.shm == null) return error.MissingShm;
+        if (self.registry.layer_shell == null) return error.MissingLayerShell;
 
         // Start IPC server. Failure is non-fatal (Constitution III: graceful degradation).
-        app.ipc_server = IpcServer.init(environ) catch |err| blk: {
+        self.ipc_server = IpcServer.init(self.environ) catch |err| blk: {
             std.debug.print("ipc: failed to start IPC server: {} — continuing without IPC\n", .{err});
             break :blk null;
         };
-
-        return app;
     }
 
     pub fn run(self: *App) !void {
@@ -177,10 +168,7 @@ pub const App = struct {
         var render_tick_count: u64 = 0;
         var render_tick_total_ns: u64 = 0;
 
-        // Pre-allocate to prevent ArrayList realloc invalidating SurfaceState pointers
-        try self.surfaces.ensureTotalCapacity(self.allocator, self.outputs.items.len);
-
-        for (self.outputs.items) |*out| {
+        for (self.outputs.items) |out| {
             if (!out.done) continue;
 
             const surface_state = try SurfaceState.create(
@@ -199,18 +187,13 @@ pub const App = struct {
             try self.surfaces.append(self.allocator, surface_state);
         }
 
-        // Attach listeners after all SurfaceStates are at their final addresses
-        for (self.surfaces.items) |*s| {
-            s.attach();
-        }
-
         // Roundtrip to trigger configure events
         if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
 
         // Initialize GLES2 effect shader using the first available EGL surface.
         if (self.egl_ctx) |*ctx| {
             var shader_ready = false;
-            for (self.surfaces.items) |*s| {
+            for (self.surfaces.items) |s| {
                 if (s.egl_surface) |*egl_surf| {
                     if (!egl_surf.makeCurrent(ctx)) {
                         std.debug.print("shader init: makeCurrent failed on a surface, trying next\n", .{});
@@ -240,7 +223,7 @@ pub const App = struct {
                             bs.bind();
                         } else {
                             // Blit shader unavailable: tear down all offscreen FBOs.
-                            for (self.surfaces.items) |*surf| {
+                            for (self.surfaces.items) |surf| {
                                 if (surf.offscreen) |*ofs| {
                                     ofs.deinit();
                                     surf.offscreen = null;
@@ -340,7 +323,7 @@ pub const App = struct {
 
                 const sh_ptr: ?*const EffectShader = if (self.effect_shader) |*sh| sh else null;
                 const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
-                for (self.surfaces.items) |*s| {
+                for (self.surfaces.items) |s| {
                     s.renderTick(sh_ptr, blit_ptr);
                 }
                 if (perf_logs_enabled) {
@@ -355,7 +338,7 @@ pub const App = struct {
                 }
 
                 var any_alive = false;
-                for (self.surfaces.items) |*s| {
+                for (self.surfaces.items) |s| {
                     if (!s.dead) {
                         any_alive = true;
                         break;
@@ -435,7 +418,7 @@ pub const App = struct {
         self.effect_shader = null;
         if (self.blit_shader) |*bs| bs.deinit();
         self.blit_shader = null;
-        for (self.surfaces.items) |*s| {
+        for (self.surfaces.items) |s| {
             s.forceCpuFallback();
         }
         if (self.egl_ctx) |*ctx| ctx.deinit();
@@ -512,7 +495,7 @@ pub const App = struct {
             return;
         }
         self.renderer_scale = scale;
-        for (self.surfaces.items) |*s| {
+        for (self.surfaces.items) |s| {
             s.renderer_scale = scale;
         }
         dispatch.writeOk(client_fd);
@@ -564,7 +547,7 @@ pub const App = struct {
         self.frame_interval_ns = new_interval_ns;
         // 2. renderer_scale
         self.renderer_scale = load_result.config.renderer_scale;
-        for (self.surfaces.items) |*s| {
+        for (self.surfaces.items) |s| {
             s.renderer_scale = load_result.config.renderer_scale;
         }
         // 3. palette colors (stays within the same effect type — no shader rebind type mismatch)
@@ -588,7 +571,7 @@ pub const App = struct {
         // Make EGL context current so GL object deletion works.
         if (self.egl_ctx) |*ctx| {
             var made_current = false;
-            for (self.surfaces.items) |*s| {
+            for (self.surfaces.items) |s| {
                 if (s.dead) continue;
                 if (s.egl_surface) |*egl_surf| {
                     made_current = egl_surf.makeCurrent(ctx);
@@ -609,13 +592,15 @@ pub const App = struct {
             _ = c.eglMakeCurrent(ctx.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
         }
 
-        for (self.surfaces.items) |*s| {
+        for (self.surfaces.items) |s| {
             s.deinit(self.display);
+            self.allocator.destroy(s);
         }
         self.surfaces.deinit(self.allocator);
 
-        for (self.outputs.items) |*out| {
+        for (self.outputs.items) |out| {
             out.deinit();
+            self.allocator.destroy(out);
         }
         self.outputs.deinit(self.allocator);
 

@@ -19,6 +19,9 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer app.deinit();
+    // Listener registration happens here, once `app` is at its final address
+    // (App.init returns by value; see App.setup doc comment).
+    try app.setup();
     try app.run();
 }
 

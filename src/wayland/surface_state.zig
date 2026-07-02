@@ -23,6 +23,9 @@ pub const BufReleaseCtx = struct {
 
 pub const SurfaceState = struct {
     allocator: std.mem.Allocator,
+    /// Owning output. The reaper in App.syncSurfaces uses this link to
+    /// associate surfaces with removed outputs.
+    output: *OutputInfo,
     layer_surface: LayerSurface,
     shm_pool: ?ShmPool,
     shm: *c.wl_shm,
@@ -66,25 +69,30 @@ pub const SurfaceState = struct {
         .release = bufferRelease,
     };
 
-    /// Create the SurfaceState value. Does NOT attach the listener yet --
-    /// call `attach` after storing at its final address.
+    /// Create a heap-allocated SurfaceState, attach its listener, and do the
+    /// initial commit. The returned pointer is the surface's permanent
+    /// address (it is registered as listener userdata), valid until the
+    /// caller destroys it after teardown.
     pub fn create(
         allocator: std.mem.Allocator,
         compositor: *c.wl_compositor,
         shm: *c.wl_shm,
         layer_shell: *c.zwlr_layer_shell_v1,
-        out: *const OutputInfo,
+        output: *OutputInfo,
         display: *c.wl_display,
         effect: *Effect,
         running: *bool,
         egl_ctx: ?*const EglContext,
         renderer_scale: f32,
         upscale_filter: UpscaleFilter,
-    ) !SurfaceState {
-        const layer_surf = try LayerSurface.create(compositor, layer_shell, out.wl_output, "wallpaper");
+    ) !*SurfaceState {
+        var layer_surf = try LayerSurface.create(compositor, layer_shell, output.wl_output, "wallpaper");
+        errdefer layer_surf.destroy();
 
-        return SurfaceState{
+        const self = try allocator.create(SurfaceState);
+        self.* = SurfaceState{
             .allocator = allocator,
+            .output = output,
             .layer_surface = layer_surf,
             .shm_pool = null,
             .shm = shm,
@@ -93,8 +101,8 @@ pub const SurfaceState = struct {
             .cell_grid = &.{},
             .grid_w = 0,
             .grid_h = 0,
-            .pixel_w = @intCast(@max(0, out.width)),
-            .pixel_h = @intCast(@max(0, out.height)),
+            .pixel_w = @intCast(@max(0, output.width)),
+            .pixel_h = @intCast(@max(0, output.height)),
             .configured = false,
             .display = display,
             .frame_callback = null,
@@ -108,17 +116,14 @@ pub const SurfaceState = struct {
             .upscale_filter = upscale_filter,
             .dead = false,
         };
-    }
 
-    /// Attach listener and do initial commit. Must be called on the
-    /// SurfaceState at its final memory location (i.e. inside the ArrayList).
-    pub fn attach(self: *SurfaceState) void {
         _ = c.zwlr_layer_surface_v1_add_listener(
             self.layer_surface.layer_surface,
             &layer_surface_listener,
             self,
         );
         c.wl_surface_commit(self.layer_surface.wl_surface);
+        return self;
     }
 
     /// Called by the timerfd tick in the main loop (~15fps).

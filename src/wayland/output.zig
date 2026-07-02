@@ -3,6 +3,9 @@ const c = @import("../wl.zig").c;
 
 pub const OutputInfo = struct {
     wl_output: ?*c.wl_output,
+    /// wl_registry.global name announcing this output. The only identifier
+    /// wl_registry.global_remove provides, so it is the removal-matching key.
+    registry_name: u32,
     name: []const u8,
     width: i32,
     height: i32,

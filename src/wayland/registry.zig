@@ -16,12 +16,12 @@ pub const Registry = struct {
     shm: ?*c.wl_shm = null,
     layer_shell: ?*c.zwlr_layer_shell_v1 = null,
     wl_registry: ?*c.wl_registry = null,
-    outputs: ?*std.ArrayList(OutputInfo) = null,
+    outputs: ?*std.ArrayList(*OutputInfo) = null,
     allocator: std.mem.Allocator = undefined,
 
     const Self = @This();
 
-    pub fn bind(self: *Self, display: *c.wl_display, outputs: *std.ArrayList(OutputInfo), allocator: std.mem.Allocator) !void {
+    pub fn bind(self: *Self, display: *c.wl_display, outputs: *std.ArrayList(*OutputInfo), allocator: std.mem.Allocator) !void {
         self.outputs = outputs;
         self.allocator = allocator;
         self.wl_registry = c.wl_display_get_registry(display) orelse return error.RegistryFailed;
@@ -67,8 +67,15 @@ fn registryGlobal(
         if (wl_out == null) return;
 
         const outputs = self.outputs orelse return;
-        const info = OutputInfo{
+        // Heap-allocate so the address (used as wl_output listener userdata)
+        // stays valid for the output's lifetime regardless of list growth.
+        const info = self.allocator.create(OutputInfo) catch {
+            std.debug.print("registry: OOM recording output {}, skipping\n", .{name});
+            return;
+        };
+        info.* = OutputInfo{
             .wl_output = wl_out,
+            .registry_name = name,
             .name = "",
             .width = 0,
             .height = 0,
@@ -77,18 +84,13 @@ fn registryGlobal(
             .removed = false,
             .allocator = self.allocator,
         };
-        // Capacity is pre-reserved in App.init (MAX_OUTPUTS) so appends
-        // after startup do not reallocate and existing item pointers
-        // (used as wl_output listener userdata) remain valid.
-        outputs.append(self.allocator, info) catch return;
-
-        // If listeners have already been attached (post-startup hotplug),
-        // attach immediately -- the pointer is stable because capacity
-        // was pre-reserved.
-        const new_out = &outputs.items[outputs.items.len - 1];
-        if (new_out.wl_output) |out| {
-            _ = c.wl_output_add_listener(out, &@import("output.zig").output_listener, new_out);
-        }
+        outputs.append(self.allocator, info) catch {
+            std.debug.print("registry: OOM appending output {}, skipping\n", .{name});
+            info.deinit();
+            self.allocator.destroy(info);
+            return;
+        };
+        _ = c.wl_output_add_listener(wl_out, &output_mod.output_listener, info);
     }
 }
 
