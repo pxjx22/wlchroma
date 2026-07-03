@@ -317,6 +317,22 @@ pub const SurfaceState = struct {
         }
     }
 
+    /// Drop the offscreen FBO so the next applyRendererScale call recreates
+    /// it. Used when upscale_filter changes: the filter is baked into the
+    /// texture parameters at creation, so a resize is not enough.
+    pub fn dropOffscreenForFilterChange(self: *SurfaceState, ctx: *const EglContext) void {
+        if (self.dead) return;
+        const ofs = if (self.offscreen) |*o| o else return;
+        var gl_ok = false;
+        if (self.egl_surface) |*egl_surf| {
+            gl_ok = egl_surf.makeCurrent(ctx);
+        }
+        // On makeCurrent failure the GL objects are orphaned to the context
+        // (reclaimed when the context is destroyed).
+        if (gl_ok) ofs.deinit();
+        self.offscreen = null;
+    }
+
     pub fn forceCpuFallback(self: *SurfaceState) void {
         if (self.dead) return;
         const pw = self.pixel_w;

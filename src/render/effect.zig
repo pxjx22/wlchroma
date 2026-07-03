@@ -109,6 +109,15 @@ pub const Effect = union(EffectType) {
         };
     }
 
+    /// Change the speed multiplier on the running effect without resetting
+    /// its accumulated phase. Reload uses this for same-effect speed changes;
+    /// a full Effect.init would visibly restart the animation.
+    pub fn setSpeed(self: *Effect, new_speed: f32) void {
+        switch (self.*) {
+            inline else => |*r| r.speed = new_speed,
+        }
+    }
+
     pub fn frameAdvanceMs(self: *const Effect) u32 {
         return switch (self.*) {
             .colormix => |*r| r.frame_advance_ms,

@@ -94,6 +94,37 @@ fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, io: std.Io, path
     return parseAndValidateExistingConfigFull(allocator, content);
 }
 
+/// Like loadConfigFull, but a missing config file is an error instead of a
+/// silent fall-back to built-in defaults. Used by the IPC reload path: the
+/// contract promises "config file not found" there, and quietly resetting a
+/// running session to defaults would be surprising.
+pub fn loadConfigFullRequireFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+    explicit_path: ?[]const u8,
+) !LoadResult {
+    if (explicit_path) |ep| {
+        return loadConfigFullFromExplicitPath(allocator, io, ep);
+    }
+    const path = resolveConfigPath(allocator, environ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.ConfigFileNotFound,
+    };
+    defer if (path.allocated) allocator.free(path.slice);
+
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path.slice, allocator, .limited(MAX_CONFIG_SIZE)) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigFileNotFound,
+        else => {
+            std.debug.print("config: failed to read {s}: {}\n", .{ path.slice, err });
+            return error.ConfigFileError;
+        },
+    };
+    defer allocator.free(content);
+
+    return parseAndValidateExistingConfigFull(allocator, content);
+}
+
 fn loadConfigFullFromDefaults(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) !LoadResult {
     const path = resolveConfigPath(allocator, environ) catch |err| {
         switch (err) {

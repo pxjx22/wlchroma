@@ -361,6 +361,68 @@ pub const App = struct {
         // else: no EGL surface yet — try again on a later sync pass.
     }
 
+    /// Replace the running effect with the one described by cfg and rebuild
+    /// the GPU shader pipeline if one is live. Only called when the effect
+    /// type actually changed. Overwrites self.effect in place: SurfaceStates
+    /// hold *Effect aimed at this field, so the switch propagates to every
+    /// surface without touching their pointers.
+    fn switchEffect(self: *App, cfg: *const config_mod.AppConfig) void {
+        // Tear down the old shader first so peak GPU object count stays flat
+        // across repeated switches.
+        if (self.effect_shader) |*sh| {
+            var context_current = false;
+            if (self.egl_ctx) |*ctx| {
+                for (self.surfaces.items) |s| {
+                    if (s.dead) continue;
+                    if (s.egl_surface) |*egl_surf| {
+                        if (egl_surf.makeCurrent(ctx)) {
+                            context_current = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (context_current) {
+                sh.deinit();
+            }
+            // Without a current-able surface (zero outputs) GL deletion is
+            // impossible; orphan the objects — they belong to the EGL context
+            // and are reclaimed when the context is destroyed.
+            self.effect_shader = null;
+        }
+
+        self.effect = Effect.init(cfg);
+
+        // Startup-parity fallback: a GPU-only effect with no usable GPU
+        // pipeline becomes colormix on the CPU path — same log line and
+        // semantics as setup().
+        if ((self.egl_ctx == null or self.gpu_pipeline_failed) and self.effect.isGpuOnly()) {
+            std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
+            const colors = self.effect.gpuPalette().?;
+            const frame_advance_ms = self.effect.frameAdvanceMs();
+            const speed = self.effect.speed();
+            self.effect = Effect{ .colormix = ColormixRenderer.init(
+                colors[0],
+                colors[1],
+                colors[2],
+                frame_advance_ms,
+                speed,
+            ) };
+        }
+
+        // Per-surface CPU stand-ins were built from the old effect; drop them
+        // so cpuEffect() rebuilds lazily from the new one.
+        for (self.surfaces.items) |s| {
+            s.shm_effect = null;
+        }
+
+        // Rebuild the shader for the new effect while EGL surfaces exist; at
+        // zero outputs this is a no-op and the next syncSurfaces pass
+        // rebuilds lazily. Failure inside latches gpu_pipeline_failed and
+        // forces the CPU fallback exactly like a startup failure.
+        self.ensureGpuPipeline();
+    }
+
     /// Compile and bind the blit shader if it is not already available.
     /// Requires an initialized effect shader and a current EGL context.
     /// Lazy so set-scale can enable offscreen rendering mid-session even
@@ -643,13 +705,20 @@ pub const App = struct {
             dispatch.writeError(client_fd, "scale values from 0.95 up to but not including 1.0 are too close to native; use a lower value or exactly 1.0");
             return;
         }
+        self.applyScaleNow(scale);
+        dispatch.writeOk(client_fd);
+    }
+
+    /// Write scale into App and surface state and apply it immediately —
+    /// create/resize/destroy offscreen FBOs now instead of waiting for the
+    /// next configure event. Shared by set-scale and reload so both have
+    /// identical visual semantics. No-op GL-wise on the CPU path where
+    /// renderer scale does not apply. Callers validate the value first.
+    fn applyScaleNow(self: *App, scale: f32) void {
         self.renderer_scale = scale;
         for (self.surfaces.items) |s| {
             s.renderer_scale = scale;
         }
-        // Apply immediately (create/resize/destroy offscreen FBOs) instead of
-        // waiting for the next configure event. No-op on the CPU path where
-        // renderer scale does not apply.
         if (self.egl_ctx) |*ctx| {
             if (scale < 1.0) {
                 // Shader compilation needs a current EGL context, which is
@@ -667,7 +736,6 @@ pub const App = struct {
                 s.applyRendererScale(ctx, blit_available);
             }
         }
-        dispatch.writeOk(client_fd);
     }
 
     fn handleSetPalette(self: *App, client_fd: posix.fd_t, name: []const u8) void {
@@ -695,20 +763,28 @@ pub const App = struct {
     }
 
     fn handleReload(self: *App, client_fd: posix.fd_t) void {
-        const path = self.config_path orelse {
-            dispatch.writeError(client_fd, "config file not found");
-            return;
-        };
-        const load_result = config_mod.loadConfigFull(self.allocator, self.io, self.environ, path) catch |err| {
+        // Full parse + validation happens before anything is applied; any
+        // error below this point leaves runtime state completely untouched.
+        // config_path may be null (daemon started without --config): the
+        // loader then resolves the same XDG/HOME lookup used at startup, but
+        // a missing file is an error here rather than a defaults fallback.
+        const load_result = config_mod.loadConfigFullRequireFile(self.allocator, self.io, self.environ, self.config_path) catch |err| {
+            if (err == error.ConfigFileNotFound) {
+                dispatch.writeError(client_fd, "config file not found");
+                return;
+            }
             var buf: [128]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "config parse failed: {}", .{err}) catch "config parse failed";
             dispatch.writeError(client_fd, msg);
             return;
         };
-        // Apply new config — update fields without tearing down EGL or surfaces.
+        const cfg = &load_result.config;
+
+        // Apply the validated config as an ordered pipeline — update fields
+        // without tearing down EGL or surfaces.
         // 1. fps / timerfd (only touched while armed; stored interval applies
         //    on the next arm when idle at zero outputs)
-        const new_interval_ns = load_result.config.frame_interval_ns;
+        const new_interval_ns = cfg.frame_interval_ns;
         if (self.timer_armed) {
             const new_interval = linux.itimerspec{
                 .it_value = .{ .sec = 0, .nsec = new_interval_ns },
@@ -717,18 +793,34 @@ pub const App = struct {
             sys.timerfdSettime(self.tfd, &new_interval) catch {};
         }
         self.frame_interval_ns = new_interval_ns;
-        // 2. renderer_scale
-        self.renderer_scale = load_result.config.renderer_scale;
-        for (self.surfaces.items) |s| {
-            s.renderer_scale = load_result.config.renderer_scale;
+        // 2. upscale filter: a change drops existing offscreen FBOs (the
+        //    filter is baked into the texture parameters at creation) so the
+        //    scale application below recreates them with the new filter.
+        if (cfg.upscale_filter != self.upscale_filter) {
+            self.upscale_filter = cfg.upscale_filter;
+            for (self.surfaces.items) |s| {
+                s.upscale_filter = cfg.upscale_filter;
+                if (self.egl_ctx) |*ctx| s.dropOffscreenForFilterChange(ctx);
+            }
         }
-        // 3. palette colors (stays within the same effect type — no shader rebind type mismatch)
-        self.effect.updatePalette(load_result.config.palette);
-        if (self.effect_shader) |*sh| sh.bind(&self.effect);
-        // 4. named palettes — replace the owned slice
+        // 3. renderer scale, applied immediately with the same semantics as
+        //    set-scale (validation already done by loadConfigFull with the
+        //    same rules set-scale enforces)
+        self.applyScaleNow(cfg.renderer_scale);
+        // 4. effect + speed: a changed effect type rebuilds the pipeline;
+        //    an unchanged one applies scalars in place — no rebuild, no
+        //    visible interruption, no animation phase reset.
+        if (@as(config_mod.EffectType, self.effect) != cfg.effect_type) {
+            self.switchEffect(cfg);
+        } else {
+            self.effect.setSpeed(cfg.speed);
+            self.effect.updatePalette(cfg.palette);
+            if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        }
+        // 5. named palettes — replace the owned slice
         self.allocator.free(self.palettes);
         self.palettes = load_result.palettes;
-        // 5. reset active palette name (reload resets to config colors, i.e. "custom")
+        // 6. reset active palette name (reload resets to config colors, i.e. "custom")
         self.active_palette_name_len = 0;
         dispatch.writeOk(client_fd);
     }
