@@ -10,7 +10,7 @@ Use this order when deciding what to do:
 
 1. `README.md`
 2. `CONTRIBUTING.md`
-3. relevant files under `specs/`
+3. relevant files under `specs/`, when present (maintainer working copies only — `specs/` is not in the public tree)
 4. `CLAUDE.md`
 5. existing code, tests, and CI
 
@@ -28,7 +28,7 @@ Prefer the smallest correct change over a broad cleanup.
 
 ## When Specs Are Required
 
-Add or update the relevant numbered spec under `specs/` when you change:
+When working in a copy that has `specs/`, add or update the relevant numbered spec when you change any of the following. When `specs/` is absent, state the same contract details (surface affected, intended behavior, verification) in the PR description instead:
 
 - config schema or config behavior
 - CLI flags or commands

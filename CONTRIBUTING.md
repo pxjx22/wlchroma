@@ -6,14 +6,13 @@
 
 - Read `README.md` first.
 - Confirm your change fits the project scope: Linux + Wayland only, with `zwlr_layer_shell_v1` (`wlr-layer-shell`) available from the compositor.
-- Check existing work under `specs/` before starting larger feature work.
+- For larger feature work, open an issue first. Feature contracts are tracked in maintainer-side spec documents that are not part of the public tree, and an issue is how your idea gets aligned with them before you invest in code.
 
 ## Repository Layout
 
 - `src/`: application and CLI source
 - `tests/`: focused tests
 - `protocols/`: Wayland protocol XML and generated inputs
-- `specs/`: feature specs, plans, tasks, contracts, and review artifacts
 
 ## Prerequisites
 
@@ -40,7 +39,7 @@ For runtime changes, include manual verification notes in your PR. Mention the c
 
 Small bug fixes and doc fixes can usually go straight to code.
 
-If your change adds a feature, changes config surface, changes CLI or IPC behavior, or changes a user-visible workflow, start by adding or updating the relevant numbered spec under `specs/`.
+If your change adds a feature, changes config surface, changes CLI or IPC behavior, or changes a user-visible workflow, start by describing the intended behavior in an issue or your PR description: what changes, the exact config/CLI/IPC surface affected, and how to verify it. The maintainer tracks numbered feature specs outside the public tree and will align your proposal with them during review.
 
 Keep feature work incremental. Avoid mixing refactors with behavior changes unless the refactor is required for the change.
 
