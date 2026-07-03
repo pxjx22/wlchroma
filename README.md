@@ -211,7 +211,7 @@ systemctl --user enable --now wlchroma.service
 
 - Monitors connected while `wlchroma` is running get the wallpaper automatically within a couple of seconds — no restart needed. New monitors use the current runtime state (including palettes or fps set via `wlchroma-ctl`).
 - Disconnected monitors are cleaned up fully; repeated plug/unplug cycles (docks, TVs) do not leak resources.
-- If every monitor disappears (undocking, lid close), `wlchroma` keeps running at ~0% CPU with `wlchroma-ctl` still responsive, and resumes rendering when a monitor returns. It exits only on SIGTERM, `wlchroma-ctl stop`, or compositor shutdown.
+- If every monitor disappears (undocking, lid close), `wlchroma` keeps running at ~0% CPU with `wlchroma-ctl` still responsive, and resumes rendering when a monitor returns. It exits only on SIGTERM, SIGINT (Ctrl-C), `wlchroma-ctl stop`, or compositor shutdown.
 - Resolution/mode changes resize the wallpaper in place.
 
 ## Limitations

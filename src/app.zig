@@ -79,11 +79,13 @@ pub const App = struct {
         const tfd = try sys.timerfdCreate(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
         errdefer sys.close(tfd);
 
-        // Block SIGTERM and capture it via signalfd so the poll loop handles it
-        // cleanly (triggers deinit, removes socket file). Without this, SIGTERM
-        // kills the process instantly and leaves a stale socket.
+        // Block SIGTERM/SIGINT and capture them via signalfd so the poll loop
+        // handles them cleanly (triggers deinit, removes socket file). Without
+        // this, either signal kills the process instantly and leaves a stale
+        // socket.
         var sig_mask = posix.sigemptyset();
         posix.sigaddset(&sig_mask, posix.SIG.TERM);
+        posix.sigaddset(&sig_mask, posix.SIG.INT);
         posix.sigprocmask(posix.SIG.BLOCK, &sig_mask, null);
         const sig_fd_flags: u32 = @bitCast(linux.O{ .NONBLOCK = true, .CLOEXEC = true });
         const sig_fd = try posix.signalfd(-1, &sig_mask, sig_fd_flags);
@@ -484,12 +486,15 @@ pub const App = struct {
                 }
             }
 
-            // Handle SIGTERM (fds[2]): drain the signalfd and begin clean shutdown.
+            // Handle SIGTERM/SIGINT (fds[2]): drain the signalfd and begin clean shutdown.
             if (fds[2].revents & linux.POLL.IN != 0) {
                 // signalfd_siginfo is 128 bytes; drain it so the fd doesn't stay readable.
                 var sig_info: [128]u8 = undefined;
                 _ = posix.read(self.sig_fd, &sig_info) catch {};
-                std.debug.print("received SIGTERM, shutting down\n", .{});
+                // ssi_signo is the first u32 of signalfd_siginfo.
+                const signo = std.mem.bytesToValue(u32, sig_info[0..4]);
+                const sig_name = if (signo == @intFromEnum(posix.SIG.INT)) "SIGINT" else "SIGTERM";
+                std.debug.print("received {s}, shutting down\n", .{sig_name});
                 self.running = false;
             }
 
