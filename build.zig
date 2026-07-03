@@ -109,4 +109,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
     test_step.dependOn(&run_ipc_tests.step);
+
+    // Effect mutation tests. effect.zig reaches into ../config/, so the
+    // module is rooted at src/ via test_exports.zig.
+    const src_exports_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_exports.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    src_exports_mod.addImport("sys", sys_mod);
+    const effect_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/effect_mutation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    effect_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const effect_tests = b.addTest(.{
+        .root_module = effect_test_mod,
+    });
+    const run_effect_tests = b.addRunArtifact(effect_tests);
+    test_step.dependOn(&run_effect_tests.step);
 }
