@@ -79,7 +79,7 @@ cp config.toml.example "${XDG_CONFIG_HOME:-$HOME/.config}/wlchroma/config.toml"
 | `[effect.settings].palette` | `["#1e1e2e", "#89b4fa", "#a6e3a1"]` | Exactly 3 `"#RRGGBB"` colors | Drives all effects. |
 | `[effect.settings].speed` | `1.0` | `0.25`–`2.5` | Animation speed multiplier. Out-of-range values exit at startup. |
 
-Config is loaded once at startup. Use `wlchroma-ctl reload` to apply changes without restarting.
+Config is loaded once at startup. Use `wlchroma-ctl reload` to apply config changes — including switching the effect — without restarting. All keys are applied: `effect.name` rebuilds the effect in place, `speed` changes take effect without restarting the animation, and `renderer.scale` / `upscale_filter` apply immediately.
 
 ## Effects
 
@@ -138,7 +138,7 @@ Palette names must be unique. The initial colors come from `[effect.settings].pa
 | `wlchroma-ctl set-fps <1-240>` | Change frame rate (runtime range is wider than config) |
 | `wlchroma-ctl set-scale <scale>` | Change render scale (`0.1`–`1.0`, applies immediately; GPU path only) |
 | `wlchroma-ctl set-palette <name>` | Switch to a named palette (config v2 required) |
-| `wlchroma-ctl reload` | Re-read config file and apply changes |
+| `wlchroma-ctl reload` | Re-read config file and apply all changes (effect, speed, fps, palette, scale, filter) |
 | `wlchroma-ctl stop` | Shut down wlchroma gracefully |
 
 Exit codes: `0` on success, `1` on error (errors printed to stderr).
