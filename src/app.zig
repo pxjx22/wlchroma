@@ -595,7 +595,7 @@ pub const App = struct {
                 const space = std.mem.indexOfScalar(u8, line, ' ');
                 const verb = if (space) |s| line[0..s] else line;
                 var buf: [96]u8 = undefined;
-                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else if (std.mem.eql(u8, verb, "set-colors")) "color" else "numeric";
                 const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "missing argument";
                 dispatch.writeError(client_fd, msg);
                 return;
@@ -604,7 +604,7 @@ pub const App = struct {
                 const space = std.mem.indexOfScalar(u8, line, ' ');
                 const verb = if (space) |s| line[0..s] else line;
                 var buf: [96]u8 = undefined;
-                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else "numeric";
+                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else if (std.mem.eql(u8, verb, "set-colors")) "color" else "numeric";
                 const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "invalid argument";
                 dispatch.writeError(client_fd, msg);
                 return;
@@ -634,6 +634,7 @@ pub const App = struct {
             .set_fps => |fps| self.handleSetFps(client_fd, fps),
             .set_scale => |scale| self.handleSetScale(client_fd, scale),
             .set_palette => |args| self.handleSetPalette(client_fd, args.nameSlice()),
+            .set_colors => |colors| self.handleSetColors(client_fd, colors),
             .reload => self.handleReload(client_fd),
         }
     }
@@ -759,6 +760,18 @@ pub const App = struct {
         const copy_len = @min(name.len, self.active_palette_name_buf.len);
         @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
         self.active_palette_name_len = copy_len;
+        dispatch.writeOk(client_fd);
+    }
+
+    fn handleSetColors(self: *App, client_fd: posix.fd_t, colors: [3]defaults.Rgb) void {
+        // Push three arbitrary colors as the live palette. Same apply path as
+        // the unchanged-effect branch of reload: update the palette in place
+        // (propagates to all surfaces via App.effect), rebind the shader on the
+        // GPU path, and reset the active palette name to "custom". No effect
+        // rebuild, no animation phase reset.
+        self.effect.updatePalette(colors);
+        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        self.active_palette_name_len = 0;
         dispatch.writeOk(client_fd);
     }
 

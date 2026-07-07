@@ -89,10 +89,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // IPC protocol tests. dispatch.zig imports server.zig by relative path,
-    // and server.zig needs the "sys" module.
+    // IPC protocol tests. dispatch.zig imports server.zig and
+    // ../config/config.zig by relative path, so the module is rooted at src/
+    // via test_ipc_exports.zig; server.zig needs the "sys" module.
     const ipc_dispatch_mod = b.createModule(.{
-        .root_source_file = b.path("src/ipc/dispatch.zig"),
+        .root_source_file = b.path("src/test_ipc_exports.zig"),
         .target = target,
         .optimize = optimize,
     });

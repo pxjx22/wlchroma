@@ -1,6 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
 const server_mod = @import("server.zig");
+const config = @import("../config/config.zig");
+const Rgb = @import("../config/defaults.zig").Rgb;
 
 /// Maximum length of a named palette identifier (bytes, not including null).
 pub const PALETTE_NAME_MAX = 63;
@@ -18,6 +20,7 @@ pub const IpcCommand = union(enum) {
     },
     set_fps: u32,
     set_scale: f32,
+    set_colors: [3]Rgb,
     query,
     stop,
 };
@@ -64,6 +67,21 @@ pub fn parseLine(line: []const u8) ParseError!IpcCommand {
         } };
         @memcpy(cmd.set_palette.name[0..rest.len], rest);
         return cmd;
+    } else if (std.mem.eql(u8, verb, "set-colors")) {
+        // Exactly three whitespace-separated #rrggbb colors. Fewer than three
+        // is a missing argument; more than three, or any unparseable color, is
+        // a bad argument. Fully validated here so the handler gets a ready
+        // [3]Rgb and malformed input never touches runtime state.
+        var it = std.mem.tokenizeAny(u8, rest, &std.ascii.whitespace);
+        var colors: [3]Rgb = undefined;
+        var n: usize = 0;
+        while (it.next()) |tok| {
+            if (n == 3) return error.BadArgument; // a fourth token
+            colors[n] = config.parseHexColor(tok) orelse return error.BadArgument;
+            n += 1;
+        }
+        if (n < 3) return error.MissingArgument;
+        return IpcCommand{ .set_colors = colors };
     } else {
         return error.UnknownCommand;
     }

@@ -127,6 +127,69 @@ test "parseLine: set-palette missing argument → MissingArgument" {
     try std.testing.expectError(error.MissingArgument, result);
 }
 
+// --- set-colors ---
+
+test "parseLine: set-colors valid triple" {
+    const cmd = try parseLine("set-colors #120c14 #e05f89 #6d9bcb");
+    const colors = cmd.set_colors;
+    try std.testing.expectEqual(@as(u8, 0x12), colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0x0c), colors[0].g);
+    try std.testing.expectEqual(@as(u8, 0x14), colors[0].b);
+    try std.testing.expectEqual(@as(u8, 0xe0), colors[1].r);
+    try std.testing.expectEqual(@as(u8, 0x5f), colors[1].g);
+    try std.testing.expectEqual(@as(u8, 0x89), colors[1].b);
+    try std.testing.expectEqual(@as(u8, 0x6d), colors[2].r);
+    try std.testing.expectEqual(@as(u8, 0x9b), colors[2].g);
+    try std.testing.expectEqual(@as(u8, 0xcb), colors[2].b);
+}
+
+test "parseLine: set-colors uppercase hex" {
+    const cmd = try parseLine("set-colors #AABBCC #001122 #FFFFFF");
+    try std.testing.expectEqual(@as(u8, 0xaa), cmd.set_colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xff), cmd.set_colors[2].b);
+}
+
+test "parseLine: set-colors extra whitespace between colors" {
+    const cmd = try parseLine("set-colors   #120c14    #e05f89   #6d9bcb");
+    try std.testing.expectEqual(@as(u8, 0x12), cmd.set_colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xcb), cmd.set_colors[2].b);
+}
+
+test "parseLine: set-colors no arguments → MissingArgument" {
+    const result = parseLine("set-colors");
+    try std.testing.expectError(error.MissingArgument, result);
+}
+
+test "parseLine: set-colors one color → MissingArgument" {
+    const result = parseLine("set-colors #120c14");
+    try std.testing.expectError(error.MissingArgument, result);
+}
+
+test "parseLine: set-colors two colors → MissingArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89");
+    try std.testing.expectError(error.MissingArgument, result);
+}
+
+test "parseLine: set-colors four colors → BadArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb #ffffff");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors unparseable color → BadArgument" {
+    const result = parseLine("set-colors #120c14 nope #6d9bcb");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors color wrong length → BadArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89 #77889");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors color missing hash → BadArgument" {
+    const result = parseLine("set-colors 120c14 e05f89 6d9bcb");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
 // --- unknown verb ---
 
 test "parseLine: unknown command → UnknownCommand" {
