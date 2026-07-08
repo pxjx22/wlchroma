@@ -131,7 +131,7 @@ test "parseLine: set-palette missing argument → MissingArgument" {
 
 test "parseLine: set-colors valid triple" {
     const cmd = try parseLine("set-colors #120c14 #e05f89 #6d9bcb");
-    const colors = cmd.set_colors;
+    const colors = cmd.set_colors.colors;
     try std.testing.expectEqual(@as(u8, 0x12), colors[0].r);
     try std.testing.expectEqual(@as(u8, 0x0c), colors[0].g);
     try std.testing.expectEqual(@as(u8, 0x14), colors[0].b);
@@ -143,16 +143,34 @@ test "parseLine: set-colors valid triple" {
     try std.testing.expectEqual(@as(u8, 0xcb), colors[2].b);
 }
 
+test "parseLine: set-colors no fade arg → fade_ms 0" {
+    const cmd = try parseLine("set-colors #120c14 #e05f89 #6d9bcb");
+    try std.testing.expectEqual(@as(u32, 0), cmd.set_colors.fade_ms);
+}
+
+test "parseLine: set-colors with fade_ms" {
+    const cmd = try parseLine("set-colors #120c14 #e05f89 #6d9bcb 600");
+    try std.testing.expectEqual(@as(u8, 0x12), cmd.set_colors.colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xcb), cmd.set_colors.colors[2].b);
+    try std.testing.expectEqual(@as(u32, 600), cmd.set_colors.fade_ms);
+}
+
+test "parseLine: set-colors explicit fade_ms 0" {
+    const cmd = try parseLine("set-colors #120c14 #e05f89 #6d9bcb 0");
+    try std.testing.expectEqual(@as(u32, 0), cmd.set_colors.fade_ms);
+}
+
 test "parseLine: set-colors uppercase hex" {
     const cmd = try parseLine("set-colors #AABBCC #001122 #FFFFFF");
-    try std.testing.expectEqual(@as(u8, 0xaa), cmd.set_colors[0].r);
-    try std.testing.expectEqual(@as(u8, 0xff), cmd.set_colors[2].b);
+    try std.testing.expectEqual(@as(u8, 0xaa), cmd.set_colors.colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xff), cmd.set_colors.colors[2].b);
 }
 
 test "parseLine: set-colors extra whitespace between colors" {
-    const cmd = try parseLine("set-colors   #120c14    #e05f89   #6d9bcb");
-    try std.testing.expectEqual(@as(u8, 0x12), cmd.set_colors[0].r);
-    try std.testing.expectEqual(@as(u8, 0xcb), cmd.set_colors[2].b);
+    const cmd = try parseLine("set-colors   #120c14    #e05f89   #6d9bcb   600");
+    try std.testing.expectEqual(@as(u8, 0x12), cmd.set_colors.colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xcb), cmd.set_colors.colors[2].b);
+    try std.testing.expectEqual(@as(u32, 600), cmd.set_colors.fade_ms);
 }
 
 test "parseLine: set-colors no arguments → MissingArgument" {
@@ -170,8 +188,29 @@ test "parseLine: set-colors two colors → MissingArgument" {
     try std.testing.expectError(error.MissingArgument, result);
 }
 
-test "parseLine: set-colors four colors → BadArgument" {
-    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb #ffffff");
+test "parseLine: set-colors non-numeric fade → BadArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb fast");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors negative fade → BadArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb -5");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors fifth token → BadArgument" {
+    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb 600 extra");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors overflowing fade → BadArgument" {
+    // Exceeds u32; parseInt returns error.Overflow, mapped to BadArgument.
+    const result = parseLine("set-colors #120c14 #e05f89 #6d9bcb 99999999999");
+    try std.testing.expectError(error.BadArgument, result);
+}
+
+test "parseLine: set-colors bad color with fade present → BadArgument" {
+    const result = parseLine("set-colors #120c14 nope #6d9bcb 600");
     try std.testing.expectError(error.BadArgument, result);
 }
 

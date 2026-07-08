@@ -138,7 +138,7 @@ Palette names must be unique. The initial colors come from `[effect.settings].pa
 | `wlchroma-ctl set-fps <1-240>` | Change frame rate (runtime range is wider than config) |
 | `wlchroma-ctl set-scale <scale>` | Change render scale (`0.1`–`1.0`, applies immediately; GPU path only) |
 | `wlchroma-ctl set-palette <name>` | Switch to a named palette (config v2 required) |
-| `wlchroma-ctl set-colors <#rrggbb> <#rrggbb> <#rrggbb>` | Set the palette to three arbitrary colors live (no config file) |
+| `wlchroma-ctl set-colors <#rrggbb> <#rrggbb> <#rrggbb> [fade_ms]` | Set the palette to three arbitrary colors live (no config file); optional fade duration glides to them |
 | `wlchroma-ctl reload` | Re-read config file and apply all changes (effect, speed, fps, palette, scale, filter) |
 | `wlchroma-ctl stop` | Shut down wlchroma gracefully |
 
@@ -148,6 +148,7 @@ Exit codes: `0` on success, `1` on error (errors printed to stderr).
 - `set-fps` accepts `1`–`240` at runtime; config file `fps` is limited to `1`–`120`.
 - `set-scale` matches the config file's `renderer.scale` rules: `0.1`–`1.0`, with values from `0.95` to just under `1.0` rejected as too close to native.
 - `set-colors` takes exactly three `#rrggbb` colors (same hex format as the config `palette`) and applies them immediately, like a same-effect `reload`. It reads no config file and does not persist — a later `reload` reverts to the config file's palette. `query` reports `palette=custom` afterward.
+- `set-colors` accepts an optional 4th argument, a fade duration in whole milliseconds: `wlchroma-ctl set-colors '#120C14' '#e05f89' '#6d9bcb' 600`. Omitted or `0` applies instantly (unchanged); a positive value glides from the current colors to the new ones over that duration with smoothstep easing. A new `set-colors` mid-fade re-targets from wherever the colors are; `reload`/`set-palette` cancel a fade. Fade smoothness scales with the running `fps` (at the 15 default a short fade is only a handful of steps); ~500 ms is a good starting point.
 
 ### Direct Socket Access
 
@@ -165,6 +166,9 @@ echo 'set-palette ocean' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
 
 # push three arbitrary colors live (no config file)
 echo 'set-colors #120C14 #e05f89 #6d9bcb' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
+
+# glide to three colors over 600 ms
+echo 'set-colors #120C14 #e05f89 #6d9bcb 600' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
 
 # or with nc (some implementations)
 echo 'reload' | nc -U "$XDG_RUNTIME_DIR/wlchroma.sock"

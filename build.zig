@@ -130,4 +130,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_effect_tests = b.addRunArtifact(effect_tests);
     test_step.dependOn(&run_effect_tests.step);
+
+    // Color-fade pure-helper tests. color_fade.zig reaches into ../config/, so
+    // the module is rooted at src/ via the same test_exports.zig shim.
+    const color_fade_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/color_fade_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    color_fade_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const color_fade_tests = b.addTest(.{
+        .root_module = color_fade_test_mod,
+    });
+    const run_color_fade_tests = b.addRunArtifact(color_fade_tests);
+    test_step.dependOn(&run_color_fade_tests.step);
 }

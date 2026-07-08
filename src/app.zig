@@ -12,6 +12,7 @@ const EglContext = @import("render/egl_context.zig").EglContext;
 const shader_mod = @import("render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const EffectShader = @import("render/effect_shader.zig").EffectShader;
+const color_fade = @import("render/color_fade.zig");
 const defaults = @import("config/defaults.zig");
 const config_mod = @import("config/config.zig");
 const AppConfig = config_mod.AppConfig;
@@ -60,6 +61,12 @@ pub const App = struct {
     /// Name of the currently active palette, or zero-length = "custom".
     active_palette_name_buf: [64]u8,
     active_palette_name_len: usize,
+    /// Authoritative last-applied color triple — the origin a faded set-colors
+    /// transitions from. Updated by every palette apply path (instant
+    /// set-colors, each fade tick, set-palette, reload, switchEffect).
+    current_palette: [3]defaults.Rgb,
+    /// In-flight palette transition, or null when no fade is animating.
+    fade: ?color_fade.ColorFade,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -116,6 +123,8 @@ pub const App = struct {
             .palettes = palettes,
             .active_palette_name_buf = std.mem.zeroes([64]u8),
             .active_palette_name_len = 0,
+            .current_palette = config.palette,
+            .fade = null,
         };
         return app;
     }
@@ -531,6 +540,18 @@ pub const App = struct {
 
                 const render_tick_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
 
+                // Advance an in-flight palette fade once per tick (before drawing
+                // surfaces, which read the shared App.effect palette). Time-based
+                // so it is frame-rate-independent and self-completes if frames are
+                // sparse; settles on the exact target when the duration elapses.
+                if (self.fade) |f| {
+                    const s = color_fade.sample(f, sys.monotonicNs());
+                    self.effect.updatePalette(s.colors);
+                    if (self.effect_shader) |*sh| sh.bind(&self.effect);
+                    self.current_palette = s.colors;
+                    if (s.done) self.fade = null;
+                }
+
                 const sh_ptr: ?*const EffectShader = if (self.effect_shader) |*sh| sh else null;
                 const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
                 for (self.surfaces.items) |s| {
@@ -634,7 +655,7 @@ pub const App = struct {
             .set_fps => |fps| self.handleSetFps(client_fd, fps),
             .set_scale => |scale| self.handleSetScale(client_fd, scale),
             .set_palette => |args| self.handleSetPalette(client_fd, args.nameSlice()),
-            .set_colors => |colors| self.handleSetColors(client_fd, colors),
+            .set_colors => |sc| self.handleSetColors(client_fd, sc.colors, sc.fade_ms),
             .reload => self.handleReload(client_fd),
         }
     }
@@ -754,8 +775,10 @@ pub const App = struct {
             dispatch.writeError(client_fd, msg);
             return;
         };
+        self.fade = null; // a named palette selection cancels any in-flight fade
         self.effect.updatePalette(colors);
         if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        self.current_palette = colors;
         // Record active palette name.
         const copy_len = @min(name.len, self.active_palette_name_buf.len);
         @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
@@ -763,15 +786,38 @@ pub const App = struct {
         dispatch.writeOk(client_fd);
     }
 
-    fn handleSetColors(self: *App, client_fd: posix.fd_t, colors: [3]defaults.Rgb) void {
-        // Push three arbitrary colors as the live palette. Same apply path as
-        // the unchanged-effect branch of reload: update the palette in place
-        // (propagates to all surfaces via App.effect), rebind the shader on the
-        // GPU path, and reset the active palette name to "custom". No effect
-        // rebuild, no animation phase reset.
-        self.effect.updatePalette(colors);
-        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+    fn handleSetColors(self: *App, client_fd: posix.fd_t, colors: [3]defaults.Rgb, fade_ms: u32) void {
+        // Push three arbitrary colors as the live palette. Both the instant and
+        // faded paths reset the active palette name to "custom" like reload does
+        // (FR-007).
         self.active_palette_name_len = 0;
+
+        // fade_ms == 0: instant apply — same path as the unchanged-effect branch
+        // of reload (update palette in place, rebind on the GPU path). No effect
+        // rebuild, no animation phase reset.
+        if (fade_ms == 0) {
+            // Instant apply — cancel any in-flight fade and snap to the target.
+            self.fade = null;
+            self.effect.updatePalette(colors);
+            if (self.effect_shader) |*sh| sh.bind(&self.effect);
+            self.current_palette = colors;
+            dispatch.writeOk(client_fd);
+            return;
+        }
+
+        // fade_ms > 0: arm a transition from the currently displayed colors. If a
+        // fade is already running, start from its exact interpolated value at
+        // this instant (frame-exact re-target); otherwise from current_palette.
+        const now = sys.monotonicNs();
+        const start = if (self.fade) |f| color_fade.sample(f, now).colors else self.current_palette;
+        self.fade = .{
+            .start = start,
+            .target = colors,
+            .start_ns = now,
+            .dur_ns = @as(u64, fade_ms) * std.time.ns_per_ms,
+        };
+        // The next render tick applies the first interpolated frame; nothing is
+        // painted here so the transition begins from `start` with no snap.
         dispatch.writeOk(client_fd);
     }
 
@@ -823,6 +869,7 @@ pub const App = struct {
         // 4. effect + speed: a changed effect type rebuilds the pipeline;
         //    an unchanged one applies scalars in place — no rebuild, no
         //    visible interruption, no animation phase reset.
+        self.fade = null; // reload applies config colors instantly, cancelling any fade
         if (@as(config_mod.EffectType, self.effect) != cfg.effect_type) {
             self.switchEffect(cfg);
         } else {
@@ -830,6 +877,7 @@ pub const App = struct {
             self.effect.updatePalette(cfg.palette);
             if (self.effect_shader) |*sh| sh.bind(&self.effect);
         }
+        self.current_palette = cfg.palette;
         // 5. named palettes — replace the owned slice
         self.allocator.free(self.palettes);
         self.palettes = load_result.palettes;

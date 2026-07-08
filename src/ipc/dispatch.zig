@@ -20,7 +20,12 @@ pub const IpcCommand = union(enum) {
     },
     set_fps: u32,
     set_scale: f32,
-    set_colors: [3]Rgb,
+    set_colors: struct {
+        colors: [3]Rgb,
+        /// Transition duration in milliseconds; 0 (or omitted) means apply
+        /// instantly, matching the pre-fade behavior.
+        fade_ms: u32,
+    },
     query,
     stop,
 };
@@ -68,20 +73,25 @@ pub fn parseLine(line: []const u8) ParseError!IpcCommand {
         @memcpy(cmd.set_palette.name[0..rest.len], rest);
         return cmd;
     } else if (std.mem.eql(u8, verb, "set-colors")) {
-        // Exactly three whitespace-separated #rrggbb colors. Fewer than three
-        // is a missing argument; more than three, or any unparseable color, is
-        // a bad argument. Fully validated here so the handler gets a ready
-        // [3]Rgb and malformed input never touches runtime state.
+        // Exactly three whitespace-separated #rrggbb colors, then an optional
+        // 4th token: a fade duration in whole milliseconds (default 0 = instant).
+        // Fewer than three colors is a missing argument; an unparseable color,
+        // an unparseable duration, or a 5th token is a bad argument. Fully
+        // validated here so the handler gets a ready { colors, fade_ms } and
+        // malformed input never touches runtime state.
         var it = std.mem.tokenizeAny(u8, rest, &std.ascii.whitespace);
         var colors: [3]Rgb = undefined;
         var n: usize = 0;
-        while (it.next()) |tok| {
-            if (n == 3) return error.BadArgument; // a fourth token
+        while (n < 3) : (n += 1) {
+            const tok = it.next() orelse return error.MissingArgument;
             colors[n] = config.parseHexColor(tok) orelse return error.BadArgument;
-            n += 1;
         }
-        if (n < 3) return error.MissingArgument;
-        return IpcCommand{ .set_colors = colors };
+        var fade_ms: u32 = 0;
+        if (it.next()) |tok| {
+            fade_ms = std.fmt.parseInt(u32, tok, 10) catch return error.BadArgument;
+            if (it.next() != null) return error.BadArgument; // a fifth token
+        }
+        return IpcCommand{ .set_colors = .{ .colors = colors, .fade_ms = fade_ms } };
     } else {
         return error.UnknownCommand;
     }

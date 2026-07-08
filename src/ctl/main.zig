@@ -65,7 +65,7 @@ fn run(args_source: std.process.Args, environ: std.process.Environ) !void {
             \\  set-fps <fps>
             \\  set-scale <scale>
             \\  set-palette <name>
-            \\  set-colors <#rrggbb> <#rrggbb> <#rrggbb>
+            \\  set-colors <#rrggbb> <#rrggbb> <#rrggbb> [fade_ms]
             \\  reload
             \\  stop
             \\
