@@ -148,6 +148,8 @@ Exit codes: `0` on success, `1` on error (errors printed to stderr).
 - `set-colors` takes exactly three `#rrggbb` colors (same hex format as the config `palette`) and applies them immediately, like a same-effect `reload`. It reads no config file and does not persist — a later `reload` reverts to the config file's palette. `query` reports `palette=custom` afterward.
 - `set-colors` accepts an optional 4th argument, a fade duration in whole milliseconds: `wlchroma-ctl set-colors '#120C14' '#e05f89' '#6d9bcb' 600`. Omitted or `0` applies instantly (unchanged); a positive value glides from the current colors to the new ones over that duration with smoothstep easing. A new `set-colors` mid-fade re-targets from wherever the colors are; `reload`/`set-palette` cancel a fade. Fade smoothness scales with the running `fps` (at the 15 default a short fade is only a handful of steps); ~500 ms is a good starting point.
 
+For a real-world `set-colors` consumer, see [mpris-chroma](https://github.com/pxjx22/mpris-chroma) — a daemon that fades the wallpaper to the album art of whatever is playing.
+
 ### Direct Socket Access
 
 The protocol is scriptable with standard Unix tools:
