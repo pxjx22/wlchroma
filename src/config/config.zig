@@ -91,7 +91,7 @@ fn loadConfigFullFromExplicitPath(allocator: std.mem.Allocator, io: std.Io, path
     };
     defer allocator.free(content);
 
-    return parseAndValidateExistingConfigFull(allocator, content);
+    return parseAndValidateFull(allocator, content);
 }
 
 /// Like loadConfigFull, but a missing config file is an error instead of a
@@ -122,7 +122,7 @@ pub fn loadConfigFullRequireFile(
     };
     defer allocator.free(content);
 
-    return parseAndValidateExistingConfigFull(allocator, content);
+    return parseAndValidateFull(allocator, content);
 }
 
 fn loadConfigFullFromDefaults(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) !LoadResult {
@@ -151,7 +151,7 @@ fn loadConfigFullFromDefaults(allocator: std.mem.Allocator, io: std.Io, environ:
     };
     defer allocator.free(content);
 
-    return parseAndValidateExistingConfigFull(allocator, content);
+    return parseAndValidateFull(allocator, content);
 }
 
 const ConfigPath = struct {
@@ -178,10 +178,6 @@ fn resolveConfigPath(allocator: std.mem.Allocator, environ: std.process.Environ)
 
     return error.NoHome;
 }
-
-const ParseOptions = struct {
-    require_version: bool = false,
-};
 
 const MAX_SEEN_KEYS = 64;
 /// Scales in [this, 1.0) are rejected as visually indistinguishable from
@@ -232,19 +228,7 @@ const SeenKeys = struct {
     }
 };
 
-fn parseAndValidateExistingConfig(content: []const u8) !AppConfig {
-    return parseAndValidateWithOptions(content, .{ .require_version = true });
-}
-
-fn parseAndValidateExistingConfigFull(allocator: std.mem.Allocator, content: []const u8) !LoadResult {
-    return parseAndValidateFullWithOptions(allocator, content, .{ .require_version = true });
-}
-
 fn parseAndValidate(content: []const u8) !AppConfig {
-    return parseAndValidateWithOptions(content, .{});
-}
-
-fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppConfig {
     var config = defaultConfig();
 
     // Current section path, e.g. "" for top-level, "outputs", "effect", "effect.settings"
@@ -252,7 +236,6 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
     var section_name: []const u8 = "";
     var seen_sections = SeenNames{ .buf = undefined, .len = 0 };
     var seen_keys = SeenKeys{ .buf = undefined, .len = 0 };
-    var saw_version = false;
 
     var line_num: usize = 0;
     var iter = std.mem.splitScalar(u8, content, '\n');
@@ -308,15 +291,8 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
         switch (section) {
             .top => {
                 if (std.mem.eql(u8, kv.key, "version")) {
-                    saw_version = true;
-                    const v = parseInteger(kv.value) orelse {
-                        std.debug.print("config: line {}: 'version' must be an integer\n", .{line_num});
-                        return error.InvalidValue;
-                    };
-                    if (v != 1 and v != 2) {
-                        std.debug.print("config: unsupported config version {}, expected 1 or 2\n", .{v});
-                        return error.UnsupportedVersion;
-                    }
+                    // Accepted for backward compatibility with older configs;
+                    // the value never gated any behavior and is ignored.
                 } else if (std.mem.eql(u8, kv.key, "fps")) {
                     const fps = parseInteger(kv.value) orelse {
                         std.debug.print("config: line {}: 'fps' must be a whole number between 1 and 120\n", .{line_num});
@@ -433,7 +409,7 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
                 }
             },
             .palettes_entry => {
-                // Palette entries are parsed in parseAndValidateFullWithOptions.
+                // Palette entries are parsed in parseAndValidateFull.
                 // The plain (non-full) parser ignores them.
             },
             .unknown => {
@@ -442,19 +418,14 @@ fn parseAndValidateWithOptions(content: []const u8, options: ParseOptions) !AppC
         }
     }
 
-    if (options.require_version and !saw_version) {
-        std.debug.print("config: existing config file is missing required top-level 'version = 1'\n", .{});
-        return error.UnsupportedVersion;
-    }
-
     return config;
 }
 
-/// Like parseAndValidateWithOptions but also collects [[palettes]] entries.
+/// Like parseAndValidate but also collects [[palettes]] entries.
 /// The returned palettes slice is heap-allocated; caller must free it.
-fn parseAndValidateFullWithOptions(allocator: std.mem.Allocator, content: []const u8, options: ParseOptions) !LoadResult {
+fn parseAndValidateFull(allocator: std.mem.Allocator, content: []const u8) !LoadResult {
     // Parse the base config using the existing logic.
-    const config = try parseAndValidateWithOptions(content, options);
+    const config = try parseAndValidate(content);
 
     // Second pass: collect [[palettes]] entries.
     const MAX_PALETTES = 64;
@@ -603,7 +574,7 @@ fn shouldTrackKey(section: Section, key: []const u8) bool {
         .effect => std.mem.eql(u8, key, "name"),
         .effect_settings => std.mem.eql(u8, key, "palette") or std.mem.eql(u8, key, "speed"),
         .renderer => std.mem.eql(u8, key, "scale") or std.mem.eql(u8, key, "upscale_filter"),
-        // palettes_entry keys are tracked per-entry in parseAndValidateFullWithOptions.
+        // palettes_entry keys are tracked per-entry in parseAndValidateFull.
         .palettes_entry, .unknown => false,
     };
 }
@@ -820,9 +791,10 @@ test "parseAndValidate full config" {
     try std.testing.expectEqual(@as(u8, 0xff), cfg.palette[2].b);
 }
 
-test "parseAndValidate bad version" {
+test "parseAndValidate ignores version value" {
     const toml = "version = 3\n";
-    try std.testing.expectError(error.UnsupportedVersion, parseAndValidate(toml));
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
 test "parseAndValidate version 2 accepted" {
@@ -839,7 +811,7 @@ test "parseAndValidateFull collects named palettes" {
         "name = \"ocean\"\n" ++
         "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n";
 
-    const result = try parseAndValidateExistingConfigFull(allocator, toml);
+    const result = try parseAndValidateFull(allocator, toml);
     defer allocator.free(result.palettes);
 
     try std.testing.expectEqual(@as(usize, 1), result.palettes.len);
@@ -860,12 +832,13 @@ test "parseAndValidateFull rejects duplicate palette names" {
         "name = \"ocean\"\n" ++
         "colors = [\"#88c0d0\", \"#81a1c1\", \"#5e81ac\"]\n";
 
-    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfigFull(allocator, toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateFull(allocator, toml));
 }
 
-test "parseAndValidate existing config requires version" {
+test "parseAndValidate existing config does not require version" {
     const toml = "fps = 15\n";
-    try std.testing.expectError(error.UnsupportedVersion, parseAndValidateExistingConfig(toml));
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(@as(u32, 15), cfg.fps);
 }
 
 test "parseAndValidate bad fps" {
@@ -907,7 +880,7 @@ test "parseAndValidate duplicate top-level key fails" {
         \\fps = 15
         \\fps = 30
     ;
-    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfig(toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(toml));
 }
 
 test "parseAndValidate duplicate section fails" {
@@ -920,7 +893,7 @@ test "parseAndValidate duplicate section fails" {
         \\[renderer]
         \\upscale_filter = "nearest"
     ;
-    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidateExistingConfig(toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(toml));
 }
 
 test "parseAndValidate repeated unknown sections are ignored" {
@@ -933,7 +906,7 @@ test "parseAndValidate repeated unknown sections are ignored" {
         \\[future]
         \\foo = 2
     ;
-    const cfg = try parseAndValidateExistingConfig(toml);
+    const cfg = try parseAndValidate(toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
@@ -945,7 +918,7 @@ test "parseAndValidate duplicate unknown keys are ignored" {
         \\foo = 1
         \\foo = 2
     ;
-    const cfg = try parseAndValidateExistingConfig(toml);
+    const cfg = try parseAndValidate(toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
@@ -958,7 +931,7 @@ test "parseAndValidate duplicate unknown key in known section is ignored" {
         \\future = 2
         \\scale = 1.0
     ;
-    const cfg = try parseAndValidateExistingConfig(toml);
+    const cfg = try parseAndValidate(toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
 }
 

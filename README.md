@@ -58,7 +58,7 @@ Load the given config file instead of the default XDG/HOME lookup.
 1. `$XDG_CONFIG_HOME/wlchroma/config.toml`
 2. `$HOME/.config/wlchroma/config.toml`
 
-If no config file exists, built-in defaults are used. If one does exist, it must include `version = 1` (or `version = 2` for named palettes — see below).
+If no config file exists, built-in defaults are used. There is a single config format; a top-level `version` key from older configs is accepted and ignored.
 
 Copy the example config to get started:
 
@@ -71,7 +71,6 @@ cp config.toml.example "${XDG_CONFIG_HOME:-$HOME/.config}/wlchroma/config.toml"
 
 | Key | Default | Range / Values | Notes |
 |---|---|---|---|
-| `version` | — | `1` or `2` | Required. `2` enables `[[palettes]]`. |
 | `fps` | `15` | `1`–`120` (integer) | Animation cadence; not tied to monitor refresh rate. |
 | `[renderer].scale` | `1.0` | `0.1`–`1.0` | `1.0` = native resolution. Lower values reduce GPU work. Values from `0.95` to `<1.0` are rejected. GPU path only. |
 | `[renderer].upscale_filter` | `"nearest"` | `"nearest"`, `"linear"` | `"nearest"` = crisp/blocky. `"linear"` = smooth/softer. GPU path only. |
@@ -99,12 +98,11 @@ Config is loaded once at startup. Use `wlchroma-ctl reload` to apply config chan
 
 All effects except `colormix` require GPU rendering. If the GPU path is unavailable, `wlchroma` renders the `colormix` fallback and logs a warning.
 
-## Config v2: Named Palettes
+## Named Palettes
 
-Set `version = 2` to define named palettes that can be switched at runtime via `wlchroma-ctl set-palette`:
+Add `[[palettes]]` entries to define named palettes that can be switched at runtime via `wlchroma-ctl set-palette`:
 
 ```toml
-version = 2
 fps = 30
 
 [effect]
@@ -233,7 +231,7 @@ systemctl --user enable --now wlchroma.service
 
 - **Exits immediately:** Confirm you are in a Wayland session and your compositor exposes `zwlr_layer_shell_v1`.
 - **Build linking errors:** Install the missing Wayland/EGL/GLES development packages and confirm `wayland-scanner` is on your `PATH`.
-- **Config ignored or rejected:** Verify the file is at one of the lookup paths and starts with `version = 1` or `version = 2`.
+- **Config ignored or rejected:** Verify the file is at one of the lookup paths and that keys match the table above (parse errors are printed at startup and on `wlchroma-ctl reload`).
 - **GPU init fails:** `wlchroma` continues on the CPU/SHM fallback, but `renderer.scale` and `renderer.upscale_filter` will not apply.
 
 ## Contributing

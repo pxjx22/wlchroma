@@ -1,4 +1,3 @@
-version = 1
 # Intentional low-power default. This is animation cadence, not monitor refresh.
 fps = 15
 
