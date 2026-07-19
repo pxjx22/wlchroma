@@ -1,6 +1,5 @@
 const std = @import("std");
-const posix = std.posix;
-const server_mod = @import("server.zig");
+const connection = @import("connection.zig");
 const config = @import("../config/config.zig");
 const Rgb = @import("../config/defaults.zig").Rgb;
 
@@ -103,28 +102,56 @@ pub fn parseLine(line: []const u8) ParseError!IpcCommand {
 
 // --- Response helpers ---
 
-/// Write "ok\n" to the client fd.
-pub fn writeOk(fd: posix.fd_t) void {
-    server_mod.IpcServer.writeLine(fd, "ok");
+pub fn appendOk(out: *connection.ResponseQueue) void {
+    out.appendLine("ok");
 }
 
-/// Write "error: <msg>\n" to the client fd.
-pub fn writeError(fd: posix.fd_t, msg: []const u8) void {
+pub fn appendError(out: *connection.ResponseQueue, msg: []const u8) void {
     var buf: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "error: {s}", .{msg}) catch "error: internal";
-    server_mod.IpcServer.writeLine(fd, line);
+    const line = std.fmt.bufPrint(&buf, "error: {s}", .{msg}) catch {
+        out.failInternal();
+        return;
+    };
+    out.appendLine(line);
 }
 
-/// Write "<key>=<value>\n" to the client fd.
-pub fn writeKv(fd: posix.fd_t, key: []const u8, value: []const u8) void {
+pub fn appendKv(
+    out: *connection.ResponseQueue,
+    key: []const u8,
+    value: []const u8,
+) void {
     var buf: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "{s}={s}", .{ key, value }) catch return;
-    server_mod.IpcServer.writeLine(fd, line);
+    const line = std.fmt.bufPrint(&buf, "{s}={s}", .{ key, value }) catch {
+        out.failInternal();
+        return;
+    };
+    out.appendLine(line);
 }
 
-/// Write "error: unknown command \"<verb>\"\n" for an unrecognised verb.
-pub fn writeUnknownCommand(fd: posix.fd_t, verb: []const u8) void {
+pub fn appendUnknownCommand(
+    out: *connection.ResponseQueue,
+    verb: []const u8,
+) void {
     var buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "unknown command \"{s}\"", .{verb}) catch "unknown command";
-    writeError(fd, msg);
+    const msg = std.fmt.bufPrint(&buf, "unknown command \"{s}\"", .{verb}) catch {
+        appendError(out, "unknown command");
+        return;
+    };
+    appendError(out, msg);
+}
+
+pub fn appendUnexpectedArgument(
+    out: *connection.ResponseQueue,
+    verb: []const u8,
+) void {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "{s} does not accept arguments",
+        .{verb},
+    ) catch {
+        appendError(out, "command does not accept arguments");
+        return;
+    };
+    appendError(out, msg);
 }

@@ -111,12 +111,6 @@ pub fn write(fd: fd_t, data: []const u8) !usize {
     return rc;
 }
 
-pub fn writev(fd: fd_t, iov: []const std.posix.iovec_const) !usize {
-    const rc = linux.writev(fd, iov.ptr, iov.len);
-    if (linux.errno(rc) != .SUCCESS) return error.WriteFailed;
-    return rc;
-}
-
 pub fn ftruncate(fd: fd_t, length: u64) !void {
     if (linux.errno(linux.ftruncate(fd, @intCast(length))) != .SUCCESS) return error.TruncateFailed;
 }

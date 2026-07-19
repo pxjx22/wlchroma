@@ -100,3 +100,18 @@ test "server replaces a stale socket when no lock is held" {
     const client_fd = try connectTo(recovered.socketPath());
     sys.close(client_fd);
 }
+
+test "accepted clients are nonblocking and close-on-exec" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const runtime_dir = try runtimeDir(&tmp, &path_buf);
+    var server = try IpcServer.initAtRuntimeDir(runtime_dir);
+    defer server.deinit();
+    const peer_fd = try connectTo(server.socketPath());
+    defer sys.close(peer_fd);
+    const client_fd = try server.accept();
+    defer sys.close(client_fd);
+    try expectNonblocking(client_fd);
+    try expectCloseOnExec(client_fd);
+}

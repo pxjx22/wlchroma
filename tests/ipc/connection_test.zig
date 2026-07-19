@@ -332,3 +332,25 @@ test "sendNoSignal survives a closed peer with default SIGPIPE behavior" {
     try std.testing.expect(posix.W.IFEXITED(status));
     try std.testing.expectEqual(@as(u8, 0), posix.W.EXITSTATUS(status));
 }
+
+test "dispatch response helpers build the query wire format" {
+    var out = ipc.connection.ResponseQueue{};
+    ipc.dispatch.appendKv(&out, "effect", "colormix");
+    ipc.dispatch.appendKv(&out, "fps", "15");
+    ipc.dispatch.appendKv(&out, "scale", "0.50");
+    ipc.dispatch.appendKv(&out, "palette", "custom");
+    ipc.dispatch.appendOk(&out);
+    try std.testing.expectEqualStrings(
+        "effect=colormix\nfps=15\nscale=0.50\npalette=custom\nok\n",
+        out.pending(),
+    );
+}
+
+test "dispatch unexpected argument response is bounded" {
+    var out = ipc.connection.ResponseQueue{};
+    ipc.dispatch.appendUnexpectedArgument(&out, "query");
+    try std.testing.expectEqualStrings(
+        "error: query does not accept arguments\n",
+        out.pending(),
+    );
+}

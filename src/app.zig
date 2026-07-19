@@ -20,7 +20,11 @@ const NamedPalette = config_mod.NamedPalette;
 const UpscaleFilter = config_mod.UpscaleFilter;
 const server_mod = @import("ipc/server.zig");
 const IpcServer = server_mod.IpcServer;
+const connection_mod = @import("ipc/connection.zig");
+const IpcConnection = connection_mod.IpcConnection;
+const ResponseQueue = connection_mod.ResponseQueue;
 const dispatch = @import("ipc/dispatch.zig");
+const signal_fd = @import("signal_fd.zig");
 const sys = @import("sys");
 
 pub const App = struct {
@@ -53,6 +57,7 @@ pub const App = struct {
     tfd: posix.fd_t,
     sig_fd: posix.fd_t,
     ipc_server: ?IpcServer,
+    ipc_client: ?IpcConnection,
     /// Config path for reload. Null when wlchroma was started without --config
     /// and no default config file was found.
     config_path: ?[]const u8,
@@ -119,6 +124,7 @@ pub const App = struct {
             .tfd = tfd,
             .sig_fd = sig_fd,
             .ipc_server = null,
+            .ipc_client = null,
             .config_path = config_path,
             .palettes = palettes,
             .active_palette_name_buf = std.mem.zeroes([64]u8),
@@ -174,10 +180,15 @@ pub const App = struct {
         if (self.registry.shm == null) return error.MissingShm;
         if (self.registry.layer_shell == null) return error.MissingLayerShell;
 
-        // Start IPC server. Failure is non-fatal (Constitution III: graceful degradation).
-        self.ipc_server = IpcServer.init(self.environ) catch |err| blk: {
-            std.debug.print("ipc: failed to start IPC server: {} — continuing without IPC\n", .{err});
-            break :blk null;
+        self.ipc_server = IpcServer.init(self.environ) catch |err| switch (err) {
+            error.AlreadyRunning => {
+                std.debug.print("ipc: another wlchroma instance owns the control socket\n", .{});
+                return error.AlreadyRunning;
+            },
+            else => blk: {
+                std.debug.print("ipc: failed to start IPC server: {} -- continuing without IPC\n", .{err});
+                break :blk null;
+            },
         };
     }
 
@@ -470,17 +481,15 @@ pub const App = struct {
         const tfd = self.tfd;
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
-        const ipc_fd: posix.fd_t = if (self.ipc_server) |*srv| srv.fd else -1;
 
-        // fds[0]=wayland  fds[1]=timerfd  fds[2]=signalfd  fds[3]=ipc (optional)
+        // fds[0]=wayland  fds[1]=timerfd  fds[2]=signalfd
+        // fds[3]=IPC listener or the one active IPC client
         var fds = [4]posix.pollfd{
             .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = self.sig_fd, .events = linux.POLL.IN, .revents = 0 },
-            .{ .fd = ipc_fd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = -1, .events = 0, .revents = 0 },
         };
-        // sig_fd is always active; ipc_fd only when the server started.
-        const nfds: u32 = if (self.ipc_server != null) 4 else 3;
 
         while (self.running) {
             if (c.wl_display_flush(self.display) < 0) {
@@ -495,28 +504,36 @@ pub const App = struct {
                 // this path would wait for the next poll wake, which may be
                 // indefinite with the frame timer disarmed.
                 self.syncSurfaces();
+                self.expireIpcClient();
+                if (!self.running) break;
                 continue;
             }
 
-            fds[0].revents = 0;
-            fds[1].revents = 0;
-            fds[2].revents = 0;
-            fds[3].revents = 0;
-            _ = posix.poll(fds[0..nfds], -1) catch |err| {
+            const poll_timeout = self.ipcPollTimeout();
+            if (!self.running) {
+                c.wl_display_cancel_read(self.display);
+                break;
+            }
+            const ipc_role = self.configureIpcPollSlot(&fds[3]);
+            const nfds: usize = if (ipc_role == .none) 3 else 4;
+
+            for (fds[0..nfds]) |*poll_fd| poll_fd.revents = 0;
+            _ = posix.poll(fds[0..nfds], poll_timeout) catch |err| {
                 c.wl_display_cancel_read(self.display);
                 std.debug.print("poll error: {}\n", .{err});
                 break;
             };
 
-            if (fds[0].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+            const poll_terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+            if (fds[0].revents & poll_terminal != 0) {
                 c.wl_display_cancel_read(self.display);
-                std.debug.print("Wayland socket HUP/ERR, compositor disconnected\n", .{});
+                std.debug.print("Wayland socket HUP/ERR/NVAL, compositor disconnected\n", .{});
                 break;
             }
 
-            if (fds[1].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0) {
+            if (fds[1].revents & poll_terminal != 0) {
                 c.wl_display_cancel_read(self.display);
-                std.debug.print("timerfd HUP/ERR, exiting\n", .{});
+                std.debug.print("timerfd HUP/ERR/NVAL, exiting\n", .{});
                 break;
             }
 
@@ -569,83 +586,291 @@ pub const App = struct {
                 }
             }
 
-            // Handle SIGTERM/SIGINT (fds[2]): drain the signalfd and begin clean shutdown.
             if (fds[2].revents & linux.POLL.IN != 0) {
-                // signalfd_siginfo is 128 bytes; drain it so the fd doesn't stay readable.
-                var sig_info: [128]u8 = undefined;
-                _ = posix.read(self.sig_fd, &sig_info) catch {};
-                // ssi_signo is the first u32 of signalfd_siginfo.
-                const signo = std.mem.bytesToValue(u32, sig_info[0..4]);
-                const sig_name = if (signo == @intFromEnum(posix.SIG.INT)) "SIGINT" else "SIGTERM";
-                std.debug.print("received {s}, shutting down\n", .{sig_name});
+                self.handleSignalEvent();
+            }
+            if (fds[2].revents & poll_terminal != 0) {
+                std.debug.print("signalfd HUP/ERR/NVAL, shutting down\n", .{});
                 self.running = false;
             }
 
-            // Handle incoming IPC command (fds[3]).
-            if (nfds == 4 and fds[3].revents & linux.POLL.IN != 0) {
-                self.handleIpcEvent();
+            // Signal shutdown wins over accepting or mutating IPC state. Otherwise use
+            // the role captured before poll, even if accepting changes ipc_client.
+            if (self.running and ipc_role != .none) {
+                self.serviceIpcSlot(ipc_role, fds[3].revents);
             }
         }
     }
 
-    /// Accept one IPC client connection, read a command line, dispatch it,
-    /// write the response, and close the client fd.
-    fn handleIpcEvent(self: *App) void {
-        var srv = &(self.ipc_server orelse return);
-        const client_fd = srv.accept() catch |err| {
-            std.debug.print("ipc: accept failed: {}\n", .{err});
+    const CommandOutcome = enum { keep_running, shutdown_after_flush };
+    const IpcPollRole = enum { none, listener, client };
+
+    fn configureIpcPollSlot(self: *App, slot: *posix.pollfd) IpcPollRole {
+        slot.revents = 0;
+        if (self.ipc_client) |*client| {
+            slot.fd = client.fd;
+            slot.events = client.pollEvents();
+            return .client;
+        }
+        if (self.ipc_server) |*server| {
+            slot.fd = server.fd;
+            slot.events = linux.POLL.IN;
+            return .listener;
+        }
+        slot.fd = -1;
+        slot.events = 0;
+        return .none;
+    }
+
+    fn expireIpcClient(self: *App) void {
+        if (self.ipc_client == null) return;
+        const now_ns = sys.monotonicNsChecked() catch |err| {
+            std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
+            self.closeIpcClient();
             return;
         };
-        defer sys.close(client_fd);
+        var expired = false;
+        if (self.ipc_client) |*client| expired = client.expired(now_ns);
+        if (expired) self.closeIpcClient();
+    }
 
-        var line_buf: [server_mod.LINE_MAX + 1]u8 = undefined;
-        const line = IpcServer.readLine(client_fd, &line_buf) catch |err| {
-            std.debug.print("ipc: readLine failed: {}\n", .{err});
+    fn ipcPollTimeout(self: *App) i32 {
+        if (self.ipc_client == null) return -1;
+        const now_ns = sys.monotonicNsChecked() catch |err| {
+            std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
+            self.closeIpcClient();
+            return -1;
+        };
+        var expired = false;
+        var timeout_ms: i32 = -1;
+        if (self.ipc_client) |*client| {
+            expired = client.expired(now_ns);
+            if (!expired) timeout_ms = client.timeoutMs(now_ns);
+        }
+        if (expired) {
+            self.closeIpcClient();
+            return -1;
+        }
+        return timeout_ms;
+    }
+
+    fn acceptIpcClient(self: *App) void {
+        const server = if (self.ipc_server) |*value| value else return;
+        const client_fd = server.accept() catch |err| switch (err) {
+            error.WouldBlock, error.ConnectionAborted => return,
+            else => {
+                std.debug.print("ipc: accept failed: {}\n", .{err});
+                return;
+            },
+        };
+        const now_ns = sys.monotonicNsChecked() catch |err| {
+            std.debug.print("ipc: monotonic clock failed after accept: {}\n", .{err});
+            sys.close(client_fd);
             return;
         };
+        std.debug.assert(self.ipc_client == null);
+        self.ipc_client = IpcConnection.init(client_fd, now_ns);
+    }
 
-        const cmd = dispatch.parseLine(line) catch |err| switch (err) {
-            error.UnknownCommand => {
-                // Extract verb for the error message.
-                const space = std.mem.indexOfScalar(u8, line, ' ');
-                const verb = if (space) |s| line[0..s] else line;
-                dispatch.writeUnknownCommand(client_fd, verb);
-                return;
+    fn disableIpcServer(self: *App) void {
+        if (self.ipc_server) |*server| server.deinit();
+        self.ipc_server = null;
+    }
+
+    fn serviceIpcSlot(self: *App, role: IpcPollRole, revents: i16) void {
+        const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+        switch (role) {
+            .none => {},
+            .listener => {
+                if (revents & linux.POLL.IN != 0) self.acceptIpcClient();
+                if (revents & terminal != 0) {
+                    std.debug.print("ipc: listener HUP/ERR/NVAL; disabling IPC\n", .{});
+                    self.disableIpcServer();
+                }
             },
-            error.UnexpectedArgument => {
-                const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-                const space = std.mem.indexOfScalar(u8, trimmed, ' ');
-                const verb = if (space) |index| trimmed[0..index] else trimmed;
-                var buf: [96]u8 = undefined;
-                const msg = std.fmt.bufPrint(
-                    &buf,
-                    "{s} does not accept arguments",
-                    .{verb},
-                ) catch "command does not accept arguments";
-                dispatch.writeError(client_fd, msg);
-                return;
+            .client => {
+                const now_ns = sys.monotonicNsChecked() catch |err| {
+                    std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
+                    self.closeIpcClient();
+                    return;
+                };
+                self.serviceActiveIpcClient(revents, now_ns);
             },
-            error.MissingArgument => {
-                const space = std.mem.indexOfScalar(u8, line, ' ');
-                const verb = if (space) |s| line[0..s] else line;
-                var buf: [96]u8 = undefined;
-                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else if (std.mem.eql(u8, verb, "set-colors")) "color" else "numeric";
-                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "missing argument";
-                dispatch.writeError(client_fd, msg);
-                return;
-            },
-            error.BadArgument => {
-                const space = std.mem.indexOfScalar(u8, line, ' ');
-                const verb = if (space) |s| line[0..s] else line;
-                var buf: [96]u8 = undefined;
-                const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette")) "name" else if (std.mem.eql(u8, verb, "set-colors")) "color" else "numeric";
-                const msg = std.fmt.bufPrint(&buf, "{s} requires a {s} argument", .{ verb, kind }) catch "invalid argument";
-                dispatch.writeError(client_fd, msg);
-                return;
-            },
+        }
+    }
+
+    fn serviceActiveIpcClient(self: *App, revents: i16, now_ns: u64) void {
+        if (self.ipc_client == null) return;
+        var expired = false;
+        if (self.ipc_client) |*client| expired = client.expired(now_ns);
+        if (expired) {
+            self.closeIpcClient();
+            return;
+        }
+
+        var should_close = false;
+        if (self.ipc_client) |*client| {
+            switch (client.state) {
+                .reading => reading: {
+                    if (revents & linux.POLL.IN == 0) break :reading;
+                    const outcome = client.readReady() catch |err| {
+                        std.debug.print("ipc: client read failed: {}\n", .{err});
+                        should_close = true;
+                        break :reading;
+                    };
+                    switch (outcome) {
+                        .incomplete => {},
+                        .complete => |line| {
+                            if (!self.queueCommandResponse(client, line)) {
+                                should_close = true;
+                            }
+                        },
+                        .line_too_long => {
+                            dispatch.appendError(&client.response, "command too long");
+                            if (!self.beginIpcResponse(client, false)) {
+                                should_close = true;
+                            }
+                        },
+                        .extra_data => {
+                            dispatch.appendError(
+                                &client.response,
+                                "multiple commands are not supported",
+                            );
+                            if (!self.beginIpcResponse(client, false)) {
+                                should_close = true;
+                            }
+                        },
+                        .peer_closed => should_close = true,
+                    }
+                },
+                .writing => writing: {
+                    if (revents & linux.POLL.OUT == 0) break :writing;
+                    const outcome = client.flushReady() catch |err| {
+                        std.debug.print("ipc: client write failed: {}\n", .{err});
+                        should_close = true;
+                        break :writing;
+                    };
+                    if (outcome == .complete) should_close = true;
+                },
+                .closed => should_close = true,
+            }
+
+            // HUP may accompany the last readable request bytes, so expected IO
+            // is serviced first. A terminal revent then closes this connection.
+            const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+            if (!should_close and revents & terminal != 0) should_close = true;
+        }
+        if (should_close) self.closeIpcClient();
+    }
+
+    fn queueCommandResponse(
+        self: *App,
+        client: *IpcConnection,
+        line: []const u8,
+    ) bool {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+        const space = std.mem.indexOfScalar(u8, trimmed, ' ');
+        const verb = if (space) |index| trimmed[0..index] else trimmed;
+
+        const cmd = dispatch.parseLine(line) catch |err| {
+            switch (err) {
+                error.UnknownCommand => {
+                    dispatch.appendUnknownCommand(&client.response, verb);
+                },
+                error.UnexpectedArgument => {
+                    dispatch.appendUnexpectedArgument(&client.response, verb);
+                },
+                error.MissingArgument, error.BadArgument => {
+                    const fallback = if (err == error.MissingArgument)
+                        "missing argument"
+                    else
+                        "invalid argument";
+                    const kind: []const u8 = if (std.mem.eql(u8, verb, "set-palette"))
+                        "name"
+                    else if (std.mem.eql(u8, verb, "set-colors"))
+                        "color"
+                    else
+                        "numeric";
+                    var buf: [96]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &buf,
+                        "{s} requires a {s} argument",
+                        .{ verb, kind },
+                    ) catch fallback;
+                    dispatch.appendError(&client.response, msg);
+                },
+            }
+            return self.beginIpcResponse(client, false);
         };
 
-        self.dispatchCommand(client_fd, cmd);
+        const outcome = self.dispatchCommand(&client.response, cmd);
+        return self.beginIpcResponse(
+            client,
+            outcome == .shutdown_after_flush,
+        );
+    }
+
+    fn beginIpcResponse(
+        _: *App,
+        client: *IpcConnection,
+        shutdown_after_flush: bool,
+    ) bool {
+        const response_now_ns = sys.monotonicNsChecked() catch |err| {
+            std.debug.print(
+                "ipc: monotonic clock failed before response: {}; closing client\n",
+                .{err},
+            );
+            // A successfully dispatched stop must still shut down when the clock
+            // failure makes a bounded response phase impossible.
+            client.shutdown_after_flush = shutdown_after_flush;
+            return false;
+        };
+        client.beginWriting(response_now_ns, shutdown_after_flush);
+        return true;
+    }
+
+    fn closeIpcClient(self: *App) void {
+        var shutdown_after_close = false;
+        if (self.ipc_client) |*client| {
+            shutdown_after_close = client.close();
+        }
+        self.ipc_client = null;
+        if (shutdown_after_close) self.running = false;
+    }
+
+    fn handleSignalEvent(self: *App) void {
+        while (true) {
+            const result = signal_fd.readOne(self.sig_fd) catch |err| {
+                std.debug.print("signalfd read failed: {}; ignoring\n", .{err});
+                return;
+            };
+            switch (result) {
+                .signal => |info| switch (info.signo) {
+                    @intFromEnum(posix.SIG.INT),
+                    @intFromEnum(posix.SIG.TERM),
+                    => {
+                        const name = if (info.signo == @intFromEnum(posix.SIG.INT))
+                            "SIGINT"
+                        else
+                            "SIGTERM";
+                        std.debug.print("received {s}, shutting down\n", .{name});
+                        self.running = false;
+                        return;
+                    },
+                    else => {
+                        std.debug.print("unexpected signalfd signal {}; ignoring\n", .{info.signo});
+                    },
+                },
+                .would_block => {
+                    std.debug.print("signalfd readiness race; ignoring\n", .{});
+                    return;
+                },
+                .short_read => |n| {
+                    std.debug.print("short signalfd record ({} bytes); ignoring\n", .{n});
+                    return;
+                },
+            }
+        }
     }
 
     fn forceCpuFallbackForGpuOnly(self: *App) void {
@@ -660,59 +885,64 @@ pub const App = struct {
         self.egl_ctx = null;
     }
 
-    /// Execute a parsed IpcCommand against the live App state.
-    fn dispatchCommand(self: *App, client_fd: posix.fd_t, cmd: dispatch.IpcCommand) void {
+    fn dispatchCommand(
+        self: *App,
+        out: *ResponseQueue,
+        cmd: dispatch.IpcCommand,
+    ) CommandOutcome {
         switch (cmd) {
-            .query => self.handleQuery(client_fd),
-            .stop => self.handleStop(client_fd),
-            .set_fps => |fps| self.handleSetFps(client_fd, fps),
-            .set_scale => |scale| self.handleSetScale(client_fd, scale),
-            .set_palette => |args| self.handleSetPalette(client_fd, args.nameSlice()),
-            .set_colors => |sc| self.handleSetColors(client_fd, sc.colors, sc.fade_ms),
-            .reload => self.handleReload(client_fd),
+            .query => self.handleQuery(out),
+            .stop => {
+                self.handleStop(out);
+                return .shutdown_after_flush;
+            },
+            .set_fps => |fps| self.handleSetFps(out, fps),
+            .set_scale => |scale| self.handleSetScale(out, scale),
+            .set_palette => |args| self.handleSetPalette(out, args.nameSlice()),
+            .set_colors => |set_colors| {
+                self.handleSetColors(out, set_colors.colors, set_colors.fade_ms);
+            },
+            .reload => self.handleReload(out),
         }
+        return .keep_running;
     }
 
-    // --- IPC command handlers (stubs — filled in per user story phase) ---
+    // --- IPC command handlers ---
 
-    fn handleQuery(self: *App, client_fd: posix.fd_t) void {
-        // effect=<tag name>
-        dispatch.writeKv(client_fd, "effect", @tagName(self.effect));
+    fn handleQuery(self: *App, out: *ResponseQueue) void {
+        dispatch.appendKv(out, "effect", @tagName(self.effect));
 
-        // fps=<computed from frame_interval_ns>
         const fps = 1_000_000_000 / @as(u64, self.frame_interval_ns);
         var fps_buf: [16]u8 = undefined;
         const fps_str = std.fmt.bufPrint(&fps_buf, "{}", .{fps}) catch "?";
-        dispatch.writeKv(client_fd, "fps", fps_str);
+        dispatch.appendKv(out, "fps", fps_str);
 
-        // scale=<2 decimal places>
         var scale_buf: [16]u8 = undefined;
-        const scale_str = std.fmt.bufPrint(&scale_buf, "{d:.2}", .{self.renderer_scale}) catch "?";
-        dispatch.writeKv(client_fd, "scale", scale_str);
+        const scale_str = std.fmt.bufPrint(
+            &scale_buf,
+            "{d:.2}",
+            .{self.renderer_scale},
+        ) catch "?";
+        dispatch.appendKv(out, "scale", scale_str);
 
-        // palette=<active name or "custom">
         const palette_name: []const u8 = if (self.active_palette_name_len > 0)
             self.active_palette_name_buf[0..self.active_palette_name_len]
         else
             "custom";
-        dispatch.writeKv(client_fd, "palette", palette_name);
-
-        dispatch.writeOk(client_fd);
+        dispatch.appendKv(out, "palette", palette_name);
+        dispatch.appendOk(out);
     }
 
-    fn handleStop(self: *App, client_fd: posix.fd_t) void {
-        dispatch.writeOk(client_fd);
-        self.running = false;
+    fn handleStop(_: *App, out: *ResponseQueue) void {
+        dispatch.appendOk(out);
     }
 
-    fn handleSetFps(self: *App, client_fd: posix.fd_t, fps: u32) void {
+    fn handleSetFps(self: *App, out: *ResponseQueue, fps: u32) void {
         if (fps < 1 or fps > 240) {
-            dispatch.writeError(client_fd, "fps must be between 1 and 240");
+            dispatch.appendError(out, "fps must be between 1 and 240");
             return;
         }
         const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
-        // Only touch the timerfd while armed; while idle at zero outputs the
-        // new interval is stored and applied on the next arm.
         if (self.timer_armed) {
             const interval = linux.itimerspec{
                 .it_value = .{ .sec = 0, .nsec = interval_ns },
@@ -720,28 +950,33 @@ pub const App = struct {
             };
             sys.timerfdSettime(self.tfd, &interval) catch |err| {
                 var buf: [64]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "timerfd_settime failed: {}", .{err}) catch "timerfd_settime failed";
-                dispatch.writeError(client_fd, msg);
+                const msg = std.fmt.bufPrint(
+                    &buf,
+                    "timerfd_settime failed: {}",
+                    .{err},
+                ) catch "timerfd_settime failed";
+                dispatch.appendError(out, msg);
                 return;
             };
         }
         self.frame_interval_ns = interval_ns;
-        dispatch.writeOk(client_fd);
+        dispatch.appendOk(out);
     }
 
-    fn handleSetScale(self: *App, client_fd: posix.fd_t, scale: f32) void {
-        // Mirror config validation for renderer.scale: 0.1–1.0, with the
-        // shared near-native rejection rule.
+    fn handleSetScale(self: *App, out: *ResponseQueue, scale: f32) void {
         if (!std.math.isFinite(scale) or scale < 0.1 or scale > 1.0) {
-            dispatch.writeError(client_fd, "scale must be between 0.1 and 1.0");
+            dispatch.appendError(out, "scale must be between 0.1 and 1.0");
             return;
         }
         if (scale < 1.0 and scale >= config_mod.RENDERER_SCALE_NEAR_NATIVE_MIN) {
-            dispatch.writeError(client_fd, "scale values from 0.95 up to but not including 1.0 are too close to native; use a lower value or exactly 1.0");
+            dispatch.appendError(
+                out,
+                "scale values from 0.95 up to but not including 1.0 are too close to native; use a lower value or exactly 1.0",
+            );
             return;
         }
         self.applyScaleNow(scale);
-        dispatch.writeOk(client_fd);
+        dispatch.appendOk(out);
     }
 
     /// Write scale into App and surface state and apply it immediately —
@@ -773,89 +1008,91 @@ pub const App = struct {
         }
     }
 
-    fn handleSetPalette(self: *App, client_fd: posix.fd_t, name: []const u8) void {
-        // Look up the named palette in the loaded palette list.
+    fn handleSetPalette(
+        self: *App,
+        out: *ResponseQueue,
+        name: []const u8,
+    ) void {
         var found: ?[3]defaults.Rgb = null;
-        for (self.palettes) |*p| {
-            if (std.mem.eql(u8, p.nameSlice(), name)) {
-                found = p.colors;
+        for (self.palettes) |*palette| {
+            if (std.mem.eql(u8, palette.nameSlice(), name)) {
+                found = palette.colors;
                 break;
             }
         }
         const colors = found orelse {
             var buf: [96]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "unknown palette \"{s}\"", .{name}) catch "unknown palette";
-            dispatch.writeError(client_fd, msg);
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "unknown palette \"{s}\"",
+                .{name},
+            ) catch "unknown palette";
+            dispatch.appendError(out, msg);
             return;
         };
-        self.fade = null; // a named palette selection cancels any in-flight fade
+        self.fade = null;
         self.effect.updatePalette(colors);
-        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        if (self.effect_shader) |*shader| shader.bind(&self.effect);
         self.current_palette = colors;
-        // Record active palette name.
         const copy_len = @min(name.len, self.active_palette_name_buf.len);
         @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
         self.active_palette_name_len = copy_len;
-        dispatch.writeOk(client_fd);
+        dispatch.appendOk(out);
     }
 
-    fn handleSetColors(self: *App, client_fd: posix.fd_t, colors: [3]defaults.Rgb, fade_ms: u32) void {
-        // Push three arbitrary colors as the live palette. Both the instant and
-        // faded paths reset the active palette name to "custom" like reload does
-        // (FR-007).
+    fn handleSetColors(
+        self: *App,
+        out: *ResponseQueue,
+        colors: [3]defaults.Rgb,
+        fade_ms: u32,
+    ) void {
         self.active_palette_name_len = 0;
 
-        // fade_ms == 0: instant apply — same path as the unchanged-effect branch
-        // of reload (update palette in place, rebind on the GPU path). No effect
-        // rebuild, no animation phase reset.
         if (fade_ms == 0) {
-            // Instant apply — cancel any in-flight fade and snap to the target.
             self.fade = null;
             self.effect.updatePalette(colors);
-            if (self.effect_shader) |*sh| sh.bind(&self.effect);
+            if (self.effect_shader) |*shader| shader.bind(&self.effect);
             self.current_palette = colors;
-            dispatch.writeOk(client_fd);
+            dispatch.appendOk(out);
             return;
         }
 
-        // fade_ms > 0: arm a transition from the currently displayed colors. If a
-        // fade is already running, start from its exact interpolated value at
-        // this instant (frame-exact re-target); otherwise from current_palette.
         const now = sys.monotonicNs();
-        const start = if (self.fade) |f| color_fade.sample(f, now).colors else self.current_palette;
+        const start = if (self.fade) |fade|
+            color_fade.sample(fade, now).colors
+        else
+            self.current_palette;
         self.fade = .{
             .start = start,
             .target = colors,
             .start_ns = now,
             .dur_ns = @as(u64, fade_ms) * std.time.ns_per_ms,
         };
-        // The next render tick applies the first interpolated frame; nothing is
-        // painted here so the transition begins from `start` with no snap.
-        dispatch.writeOk(client_fd);
+        dispatch.appendOk(out);
     }
 
-    fn handleReload(self: *App, client_fd: posix.fd_t) void {
-        // Full parse + validation happens before anything is applied; any
-        // error below this point leaves runtime state completely untouched.
-        // config_path may be null (daemon started without --config): the
-        // loader then resolves the same XDG/HOME lookup used at startup, but
-        // a missing file is an error here rather than a defaults fallback.
-        const load_result = config_mod.loadConfigFullRequireFile(self.allocator, self.io, self.environ, self.config_path) catch |err| {
+    fn handleReload(self: *App, out: *ResponseQueue) void {
+        const load_result = config_mod.loadConfigFullRequireFile(
+            self.allocator,
+            self.io,
+            self.environ,
+            self.config_path,
+        ) catch |err| {
             if (err == error.ConfigFileNotFound) {
-                dispatch.writeError(client_fd, "config file not found");
+                dispatch.appendError(out, "config file not found");
                 return;
             }
             var buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "config parse failed: {}", .{err}) catch "config parse failed";
-            dispatch.writeError(client_fd, msg);
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "config parse failed: {}",
+                .{err},
+            ) catch "config parse failed";
+            dispatch.appendError(out, msg);
             return;
         };
         const cfg = &load_result.config;
 
-        // Apply the validated config as an ordered pipeline — update fields
-        // without tearing down EGL or surfaces.
-        // 1. fps / timerfd (only touched while armed; stored interval applies
-        //    on the next arm when idle at zero outputs)
         const new_interval_ns = cfg.frame_interval_ns;
         if (self.timer_armed) {
             const new_interval = linux.itimerspec{
@@ -865,41 +1102,34 @@ pub const App = struct {
             sys.timerfdSettime(self.tfd, &new_interval) catch {};
         }
         self.frame_interval_ns = new_interval_ns;
-        // 2. upscale filter: a change drops existing offscreen FBOs (the
-        //    filter is baked into the texture parameters at creation) so the
-        //    scale application below recreates them with the new filter.
+
         if (cfg.upscale_filter != self.upscale_filter) {
             self.upscale_filter = cfg.upscale_filter;
-            for (self.surfaces.items) |s| {
-                s.upscale_filter = cfg.upscale_filter;
-                if (self.egl_ctx) |*ctx| s.dropOffscreenForFilterChange(ctx);
+            for (self.surfaces.items) |surface| {
+                surface.upscale_filter = cfg.upscale_filter;
+                if (self.egl_ctx) |*ctx| surface.dropOffscreenForFilterChange(ctx);
             }
         }
-        // 3. renderer scale, applied immediately with the same semantics as
-        //    set-scale (validation already done by loadConfigFull with the
-        //    same rules set-scale enforces)
+
         self.applyScaleNow(cfg.renderer_scale);
-        // 4. effect + speed: a changed effect type rebuilds the pipeline;
-        //    an unchanged one applies scalars in place — no rebuild, no
-        //    visible interruption, no animation phase reset.
-        self.fade = null; // reload applies config colors instantly, cancelling any fade
+        self.fade = null;
         if (@as(config_mod.EffectType, self.effect) != cfg.effect_type) {
             self.switchEffect(cfg);
         } else {
             self.effect.setSpeed(cfg.speed);
             self.effect.updatePalette(cfg.palette);
-            if (self.effect_shader) |*sh| sh.bind(&self.effect);
+            if (self.effect_shader) |*shader| shader.bind(&self.effect);
         }
         self.current_palette = cfg.palette;
-        // 5. named palettes — replace the owned slice
+
         self.allocator.free(self.palettes);
         self.palettes = load_result.palettes;
-        // 6. reset active palette name (reload resets to config colors, i.e. "custom")
         self.active_palette_name_len = 0;
-        dispatch.writeOk(client_fd);
+        dispatch.appendOk(out);
     }
 
     pub fn deinit(self: *App) void {
+        self.closeIpcClient();
         if (self.ipc_server) |*srv| srv.deinit();
         self.ipc_server = null;
         self.allocator.free(self.palettes);
