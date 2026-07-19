@@ -33,10 +33,45 @@ pub fn listen(fd: fd_t, backlog: u32) !void {
     if (linux.errno(linux.listen(fd, backlog)) != .SUCCESS) return error.ListenFailed;
 }
 
-pub fn accept4(fd: fd_t, flags: u32) !fd_t {
-    const rc = linux.accept4(fd, null, null, flags);
-    if (linux.errno(rc) != .SUCCESS) return error.AcceptFailed;
-    return @intCast(rc);
+pub const AcceptError = error{
+    WouldBlock,
+    ConnectionAborted,
+    AcceptFailed,
+};
+
+pub fn accept4(fd: fd_t, flags: u32) AcceptError!fd_t {
+    while (true) {
+        const rc = linux.accept4(fd, null, null, flags);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .CONNABORTED => return error.ConnectionAborted,
+            else => return error.AcceptFailed,
+        }
+    }
+}
+
+pub fn tryLockExclusive(fd: fd_t) error{ AlreadyRunning, LockFailed }!void {
+    while (true) {
+        const rc = linux.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .AGAIN => return error.AlreadyRunning,
+            else => return error.LockFailed,
+        }
+    }
+}
+
+pub fn setFileMode(fd: fd_t, mode: std.posix.mode_t) error{SetFileModeFailed}!void {
+    while (true) {
+        switch (linux.errno(linux.fchmod(fd, mode))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.SetFileModeFailed,
+        }
+    }
 }
 
 pub fn write(fd: fd_t, data: []const u8) !usize {
@@ -67,10 +102,24 @@ pub fn timerfdSettime(fd: fd_t, new_value: *const linux.itimerspec) !void {
     }
 }
 
-/// CLOCK_MONOTONIC in nanoseconds. Returns 0 if the clock is unavailable,
-/// which callers only use for perf logging and PRNG seeding.
-pub fn monotonicNs() u64 {
+/// Checked CLOCK_MONOTONIC nanoseconds for correctness-sensitive deadlines.
+pub fn monotonicNsChecked() error{ClockGetTimeFailed}!u64 {
     var ts: linux.timespec = undefined;
-    if (linux.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    if (linux.errno(linux.clock_gettime(.MONOTONIC, &ts)) != .SUCCESS) {
+        return error.ClockGetTimeFailed;
+    }
+    if (ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) {
+        return error.ClockGetTimeFailed;
+    }
+    const seconds: u64 = @intCast(ts.sec);
+    const nanoseconds: u64 = @intCast(ts.nsec);
+    const base = std.math.mul(u64, seconds, std.time.ns_per_s) catch
+        return error.ClockGetTimeFailed;
+    return std.math.add(u64, base, nanoseconds) catch
+        return error.ClockGetTimeFailed;
+}
+
+/// Best-effort timestamp retained for performance logging and animation code.
+pub fn monotonicNs() u64 {
+    return monotonicNsChecked() catch 0;
 }

@@ -125,6 +125,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ipc_connection_tests.step);
     ipc_test_step.dependOn(&run_ipc_connection_tests.step);
 
+    const ipc_server_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/server_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_server_test_mod.addImport("ipc", ipc_dispatch_mod);
+    const ipc_server_tests = b.addTest(.{
+        .root_module = ipc_server_test_mod,
+    });
+    const run_ipc_server_tests = b.addRunArtifact(ipc_server_tests);
+    test_step.dependOn(&run_ipc_server_tests.step);
+    ipc_test_step.dependOn(&run_ipc_server_tests.step);
+
     // Effect mutation tests. effect.zig reaches into ../config/, so the
     // module is rooted at src/ via test_exports.zig.
     const src_exports_mod = b.createModule(.{

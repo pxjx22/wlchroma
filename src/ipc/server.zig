@@ -3,8 +3,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const sys = @import("sys");
 
-/// Maximum path length for a Unix domain socket (sockaddr_un.sun_path is 108 bytes on Linux).
-const SOCK_PATH_MAX = 107;
+const SUN_PATH_BYTES = @sizeOf(@FieldType(posix.sockaddr.un, "path"));
 
 /// Line buffer size for one IPC command (including newline).
 pub const LINE_MAX = 4096;
@@ -13,62 +12,88 @@ pub const LINE_MAX = 4096;
 /// Lifecycle: init() → registered in poll loop → deinit() removes the socket file.
 pub const IpcServer = struct {
     fd: posix.fd_t,
-    path_buf: [SOCK_PATH_MAX:0]u8,
+    lock_fd: posix.fd_t,
+    path_buf: [SUN_PATH_BYTES]u8,
     path_len: usize,
 
-    /// Create the socket, unlink any stale file, bind, and listen.
-    /// Returns error if $XDG_RUNTIME_DIR is unset/empty, the path is too long,
-    /// or bind/listen fails. Caller degrades gracefully on error.
     pub fn init(environ: std.process.Environ) !IpcServer {
         const runtime_dir = environ.getPosix("XDG_RUNTIME_DIR") orelse
             return error.NoRuntimeDir;
+        return initAtRuntimeDir(runtime_dir);
+    }
+
+    pub fn initAtRuntimeDir(runtime_dir: []const u8) !IpcServer {
         if (runtime_dir.len == 0) return error.NoRuntimeDir;
 
         var server = IpcServer{
             .fd = undefined,
-            .path_buf = std.mem.zeroes([SOCK_PATH_MAX:0]u8),
+            .lock_fd = undefined,
+            .path_buf = std.mem.zeroes([SUN_PATH_BYTES]u8),
             .path_len = 0,
         };
+        const socket_path = std.fmt.bufPrintZ(
+            &server.path_buf,
+            "{s}/wlchroma.sock",
+            .{runtime_dir},
+        ) catch return error.PathTooLong;
+        server.path_len = socket_path.len;
 
-        // Build socket path into the fixed buffer.
-        const path = std.fmt.bufPrintZ(&server.path_buf, "{s}/wlchroma.sock", .{runtime_dir}) catch
-            return error.PathTooLong;
-        server.path_len = path.len;
+        var lock_path_buf = std.mem.zeroes([SUN_PATH_BYTES]u8);
+        const lock_path = std.fmt.bufPrintZ(
+            &lock_path_buf,
+            "{s}/wlchroma.lock",
+            .{runtime_dir},
+        ) catch return error.PathTooLong;
+        const lock_fd = try posix.openatZ(
+            posix.AT.FDCWD,
+            lock_path.ptr,
+            .{
+                .ACCMODE = .RDWR,
+                .CREAT = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = true,
+            },
+            @as(posix.mode_t, 0o600),
+        );
+        errdefer sys.close(lock_fd);
+        try sys.setFileMode(lock_fd, 0o600);
+        try sys.tryLockExclusive(lock_fd);
 
-        // Remove stale socket from a previous crash.
-        sys.unlinkZ(path) catch |err| switch (err) {
-            error.FileNotFound => {}, // expected — no stale socket
-            else => std.debug.print("ipc: warning: unlink({s}) failed: {}\n", .{ path, err }),
+        sys.unlinkZ(socket_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
         };
 
-        // Create the listening socket.
-        const fd = try sys.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        errdefer sys.close(fd);
+        const fd = try sys.socket(
+            posix.AF.UNIX,
+            posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+            0,
+        );
+        var bound = false;
+        errdefer {
+            sys.close(fd);
+            if (bound) sys.unlinkZ(socket_path) catch {};
+        }
 
         var addr = std.mem.zeroes(posix.sockaddr.un);
         addr.family = posix.AF.UNIX;
-        if (path.len >= addr.path.len) return error.PathTooLong;
-        @memcpy(addr.path[0..path.len], path);
-
+        if (socket_path.len >= addr.path.len) return error.PathTooLong;
+        @memcpy(addr.path[0..socket_path.len], socket_path);
         try sys.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        bound = true;
         try sys.listen(fd, 8);
 
         server.fd = fd;
+        server.lock_fd = lock_fd;
         return server;
     }
 
-    /// Close the listening socket and remove the socket file.
-    pub fn deinit(self: *IpcServer) void {
-        sys.close(self.fd);
-        const path = self.path_buf[0..self.path_len :0];
-        sys.unlinkZ(path) catch {};
+    pub fn socketPath(self: *const IpcServer) [:0]const u8 {
+        return self.path_buf[0..self.path_len :0];
     }
 
-    /// Accept a pending connection. Returns the client fd.
-    /// The caller is responsible for closing the client fd.
-    pub fn accept(self: *IpcServer) !posix.fd_t {
+    pub fn accept(self: *IpcServer) sys.AcceptError!posix.fd_t {
         const client_fd = try sys.accept4(self.fd, posix.SOCK.CLOEXEC);
-        // Set a 200 ms receive timeout so a slow/stalled client cannot block the render loop.
         const timeout = posix.timeval{ .sec = 0, .usec = 200_000 };
         posix.setsockopt(
             client_fd,
@@ -77,6 +102,12 @@ pub const IpcServer = struct {
             std.mem.asBytes(&timeout),
         ) catch {};
         return client_fd;
+    }
+
+    pub fn deinit(self: *IpcServer) void {
+        sys.close(self.fd);
+        sys.unlinkZ(self.socketPath()) catch {};
+        sys.close(self.lock_fd);
     }
 
     /// Read one newline-terminated line from `fd` into `buf`.

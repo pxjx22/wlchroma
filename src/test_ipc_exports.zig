@@ -4,6 +4,8 @@
 
 pub const dispatch = @import("ipc/dispatch.zig");
 pub const connection = @import("ipc/connection.zig");
+pub const server = @import("ipc/server.zig");
+pub const sys = @import("sys");
 
 pub const IpcCommand = dispatch.IpcCommand;
 pub const ParseError = dispatch.ParseError;
