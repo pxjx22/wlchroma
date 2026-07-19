@@ -1,8 +1,23 @@
 const std = @import("std");
+const posix = std.posix;
+const linux = std.os.linux;
+const sys = @import("sys");
 
 pub const REQUEST_MAX: usize = 4096;
 pub const RESPONSE_MAX: usize = 1024;
 pub const PHASE_TIMEOUT_NS: u64 = 500 * std.time.ns_per_ms;
+
+pub const State = enum { reading, writing, closed };
+
+pub const ReadOutcome = union(enum) {
+    incomplete,
+    complete: []const u8,
+    line_too_long,
+    extra_data,
+    peer_closed,
+};
+
+pub const FlushOutcome = enum { pending, complete };
 
 pub const FeedResult = union(enum) {
     incomplete,
@@ -117,3 +132,100 @@ pub fn pollTimeoutMs(now_ns: u64, deadline_ns: u64) i32 {
     const max_timeout_ms: u64 = @intCast(std.math.maxInt(i32));
     return @intCast(@min(milliseconds, max_timeout_ms));
 }
+
+pub const IpcConnection = struct {
+    fd: posix.fd_t,
+    request: RequestAccumulator = .{},
+    response: ResponseQueue = .{},
+    request_deadline_ns: u64,
+    response_deadline_ns: u64 = 0,
+    state: State = .reading,
+    shutdown_after_flush: bool = false,
+
+    pub fn init(fd: posix.fd_t, now_ns: u64) IpcConnection {
+        return .{
+            .fd = fd,
+            .request_deadline_ns = deadlineAfter(now_ns),
+        };
+    }
+
+    pub fn pollEvents(self: *const IpcConnection) i16 {
+        return switch (self.state) {
+            .reading => linux.POLL.IN,
+            .writing => linux.POLL.OUT,
+            .closed => 0,
+        };
+    }
+
+    pub fn deadlineNs(self: *const IpcConnection) u64 {
+        return switch (self.state) {
+            .reading => self.request_deadline_ns,
+            .writing => self.response_deadline_ns,
+            .closed => 0,
+        };
+    }
+
+    pub fn timeoutMs(self: *const IpcConnection, now_ns: u64) i32 {
+        return pollTimeoutMs(now_ns, self.deadlineNs());
+    }
+
+    pub fn expired(self: *const IpcConnection, now_ns: u64) bool {
+        return deadlineExpired(now_ns, self.deadlineNs());
+    }
+
+    pub fn readReady(self: *IpcConnection) !ReadOutcome {
+        std.debug.assert(self.state == .reading);
+        var scratch: [REQUEST_MAX]u8 = undefined;
+        while (true) {
+            const remaining = REQUEST_MAX - self.request.len;
+            std.debug.assert(remaining > 0);
+            const n = posix.read(self.fd, scratch[0..remaining]) catch |err| switch (err) {
+                error.WouldBlock => return .incomplete,
+                error.ConnectionResetByPeer, error.SocketUnconnected => return .peer_closed,
+                else => return err,
+            };
+            if (n == 0) return .peer_closed;
+            switch (self.request.feed(scratch[0..n])) {
+                .incomplete => continue,
+                .complete => |line| return .{ .complete = line },
+                .line_too_long => return .line_too_long,
+                .extra_data => return .extra_data,
+            }
+        }
+    }
+
+    pub fn beginWriting(
+        self: *IpcConnection,
+        now_ns: u64,
+        shutdown_after_flush: bool,
+    ) void {
+        std.debug.assert(self.state == .reading);
+        std.debug.assert(self.response.len > 0);
+        self.response_deadline_ns = deadlineAfter(now_ns);
+        self.shutdown_after_flush = shutdown_after_flush;
+        self.state = .writing;
+    }
+
+    pub fn flushReady(self: *IpcConnection) sys.SendError!FlushOutcome {
+        std.debug.assert(self.state == .writing);
+        while (!self.response.isComplete()) {
+            const sent = sys.sendNoSignal(self.fd, self.response.pending()) catch |err| switch (err) {
+                error.WouldBlock => return .pending,
+                else => return err,
+            };
+            if (sent == 0) return error.SocketNotConnected;
+            self.response.consume(sent) catch unreachable;
+        }
+        return .complete;
+    }
+
+    pub fn close(self: *IpcConnection) bool {
+        const shutdown = self.shutdown_after_flush;
+        if (self.state != .closed) {
+            sys.close(self.fd);
+            self.fd = -1;
+            self.state = .closed;
+        }
+        return shutdown;
+    }
+};

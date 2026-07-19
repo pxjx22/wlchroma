@@ -1,6 +1,9 @@
 const std = @import("std");
 const ipc = @import("ipc");
 const connection = ipc.connection;
+const posix = std.posix;
+const linux = std.os.linux;
+const sys = ipc.sys;
 
 fn expectComplete(
     result: connection.FeedResult,
@@ -137,4 +140,195 @@ test "poll timeout rounds up without extending exact milliseconds" {
     try std.testing.expectEqual(@as(i32, 0), connection.pollTimeoutMs(deadline, deadline));
     try std.testing.expectEqual(@as(i32, 1), connection.pollTimeoutMs(deadline - 1, deadline));
     try std.testing.expectEqual(@as(i32, 5), connection.pollTimeoutMs(5 * std.time.ns_per_ms, deadline));
+}
+
+fn socketPair() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = linux.socketpair(
+        posix.AF.UNIX,
+        posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
+        0,
+        &fds,
+    );
+    if (linux.errno(rc) != .SUCCESS) return error.TestSocketPairFailed;
+    return fds;
+}
+
+fn sendExact(fd: posix.fd_t, bytes: []const u8) !void {
+    const sent = try sys.sendNoSignal(fd, bytes);
+    try std.testing.expectEqual(bytes.len, sent);
+}
+
+fn fillUntilWouldBlock(fd: posix.fd_t) !void {
+    const filler = [_]u8{0xa5} ** 4096;
+    for (0..4096) |_| {
+        _ = sys.sendNoSignal(fd, &filler) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return err,
+        };
+    }
+    return error.TestSocketDidNotSaturate;
+}
+
+fn drainUntilWouldBlock(fd: posix.fd_t) !void {
+    var buf: [8192]u8 = undefined;
+    for (0..4096) |_| {
+        const n = posix.read(fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return err,
+        };
+        if (n == 0) return;
+    }
+    return error.TestSocketDidNotDrain;
+}
+
+test "connection reads fragmented request without resetting deadline" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    defer sys.close(fds[1]);
+    const request_deadline = 100 + connection.PHASE_TIMEOUT_NS;
+    try std.testing.expectEqual(request_deadline, client.deadlineNs());
+
+    try sendExact(fds[1], "que");
+    try std.testing.expect(try client.readReady() == .incomplete);
+    try std.testing.expectEqual(request_deadline, client.deadlineNs());
+    try sendExact(fds[1], "ry\n");
+    switch (try client.readReady()) {
+        .complete => |line| try std.testing.expectEqualStrings("query", line),
+        else => return error.TestExpectedComplete,
+    }
+}
+
+test "connection never dispatches a partial request at EOF" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    var peer_fd: ?posix.fd_t = fds[1];
+    defer if (peer_fd) |fd| sys.close(fd);
+
+    try sendExact(peer_fd.?, "que");
+    try std.testing.expect(try client.readReady() == .incomplete);
+    sys.close(peer_fd.?);
+    peer_fd = null;
+    try std.testing.expect(try client.readReady() == .peer_closed);
+}
+
+test "writing resets deadline and preserves stop through pending flush" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    defer sys.close(fds[1]);
+    try fillUntilWouldBlock(client.fd);
+
+    client.response.appendLine("ok");
+    client.beginWriting(500, true);
+    const response_deadline = 500 + connection.PHASE_TIMEOUT_NS;
+    try std.testing.expectEqual(response_deadline, client.deadlineNs());
+    try std.testing.expect(!client.expired(response_deadline - 1));
+    try std.testing.expect(client.expired(response_deadline));
+    try std.testing.expect(try client.flushReady() == .pending);
+    try std.testing.expectEqual(@as(usize, 0), client.response.sent_offset);
+    try std.testing.expect(client.shutdown_after_flush);
+
+    try drainUntilWouldBlock(fds[1]);
+    try std.testing.expect(try client.flushReady() == .complete);
+    var reply: [3]u8 = undefined;
+    const n = try posix.read(fds[1], &reply);
+    try std.testing.expectEqualStrings("ok\n", reply[0..n]);
+    try std.testing.expect(client.close());
+}
+
+test "connection poll interest follows its state" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    defer sys.close(fds[1]);
+
+    try std.testing.expectEqual(linux.POLL.IN, client.pollEvents());
+    client.response.appendLine("ok");
+    client.beginWriting(500, false);
+    try std.testing.expectEqual(linux.POLL.OUT, client.pollEvents());
+    try std.testing.expect(!client.close());
+    try std.testing.expectEqual(@as(i16, 0), client.pollEvents());
+}
+
+test "response deadline closure retains stop disposition" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    defer sys.close(fds[1]);
+    client.response.appendLine("ok");
+    client.beginWriting(500, true);
+    const deadline = client.deadlineNs();
+
+    try std.testing.expect(client.expired(deadline));
+    try std.testing.expect(client.close());
+}
+
+test "terminal response failure retains stop disposition" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    var peer_fd: ?posix.fd_t = fds[1];
+    defer if (peer_fd) |fd| sys.close(fd);
+    client.response.appendLine("ok");
+    client.beginWriting(500, true);
+    sys.close(peer_fd.?);
+    peer_fd = null;
+
+    if (client.flushReady()) |_| {
+        return error.TestExpectedTerminalWriteError;
+    } else |err| switch (err) {
+        error.BrokenPipe, error.ConnectionResetByPeer, error.SocketNotConnected => {},
+        else => return err,
+    }
+    try std.testing.expect(client.close());
+}
+
+test "normal connection close does not request shutdown" {
+    const fds = try socketPair();
+    var client = connection.IpcConnection.init(fds[0], 100);
+    defer _ = client.close();
+    defer sys.close(fds[1]);
+    try std.testing.expect(!client.close());
+}
+
+fn sigpipeChild() noreturn {
+    const action: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.PIPE, &action, null);
+    var mask = posix.sigemptyset();
+    posix.sigaddset(&mask, .PIPE);
+    posix.sigprocmask(posix.SIG.UNBLOCK, &mask, null);
+
+    const fds = socketPair() catch linux.exit(10);
+    sys.close(fds[1]);
+    _ = sys.sendNoSignal(fds[0], "x") catch |err| {
+        sys.close(fds[0]);
+        linux.exit(if (err == error.BrokenPipe) 0 else 11);
+    };
+    sys.close(fds[0]);
+    linux.exit(12);
+}
+
+test "sendNoSignal survives a closed peer with default SIGPIPE behavior" {
+    const fork_rc = linux.fork();
+    if (linux.errno(fork_rc) != .SUCCESS) return error.TestForkFailed;
+    if (fork_rc == 0) sigpipeChild();
+
+    var status: u32 = 0;
+    while (true) {
+        const wait_rc = linux.waitpid(@intCast(fork_rc), &status, 0);
+        switch (linux.errno(wait_rc)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.TestWaitFailed,
+        }
+    }
+    try std.testing.expect(posix.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u8, 0), posix.W.EXITSTATUS(status));
 }

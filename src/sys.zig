@@ -52,6 +52,37 @@ pub fn accept4(fd: fd_t, flags: u32) AcceptError!fd_t {
     }
 }
 
+pub const SendError = error{
+    WouldBlock,
+    BrokenPipe,
+    ConnectionResetByPeer,
+    SocketNotConnected,
+    SendFailed,
+};
+
+pub fn sendNoSignal(fd: fd_t, data: []const u8) SendError!usize {
+    if (data.len == 0) return 0;
+    while (true) {
+        const rc = linux.sendto(
+            fd,
+            data.ptr,
+            data.len,
+            linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT,
+            null,
+            0,
+        );
+        switch (linux.errno(rc)) {
+            .SUCCESS => return rc,
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .PIPE => return error.BrokenPipe,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .NOTCONN => return error.SocketNotConnected,
+            else => return error.SendFailed,
+        }
+    }
+}
+
 pub fn tryLockExclusive(fd: fd_t) error{ AlreadyRunning, LockFailed }!void {
     while (true) {
         const rc = linux.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB);
