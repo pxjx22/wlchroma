@@ -28,7 +28,7 @@ The intended Wayland userdata architecture is otherwise sound: `App` settles bef
 
 ## Remediation Phases
 
-1. **IPC hardening:** `IPC-H1`, `IPC-H2`, `IPC-M1`, `IPC-L1`, `IPC-L2`, `IPC-L3`, and `APP-L1`. Design: [`2026-07-19-ipc-hardening-design.md`](../design/2026-07-19-ipc-hardening-design.md).
+1. **IPC hardening:** `IPC-H1`, `IPC-H2`, `IPC-M1`, `IPC-L1`, `IPC-L2`, `IPC-L3`, and `APP-L1`. Design: [`2026-07-19-ipc-hardening-design.md`](../design/2026-07-19-ipc-hardening-design.md). Plan: [`2026-07-19-phase-1-ipc-hardening.md`](../superpowers/plans/2026-07-19-phase-1-ipc-hardening.md).
 2. **Wayland/EGL safety:** `WL-H1`, `WL-H2`, `GPU-M1`, `GPU-M2`, `GPU-M3`, and `WL-L1`.
 3. **Rendering, configuration, and modernization:** all remaining `GPU`, `RENDER`, `APP`, `PERF`, `CONF`, and `BUILD` findings.
 

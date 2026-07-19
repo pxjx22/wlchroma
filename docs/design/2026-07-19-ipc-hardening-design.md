@@ -2,9 +2,11 @@
 
 **Date:** 2026-07-19
 
-**Status:** Approved design; pending implementation plan
+**Status:** Approved design; implementation plan ready
 
 **Audit mapping:** `IPC-H1`, `IPC-H2`, `IPC-M1`, `IPC-L1`, `IPC-L2`, `IPC-L3`, `APP-L1`
+
+**Implementation plan:** [`2026-07-19-phase-1-ipc-hardening.md`](../superpowers/plans/2026-07-19-phase-1-ipc-hardening.md)
 
 ## Goal
 
