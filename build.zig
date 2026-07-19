@@ -89,9 +89,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // IPC protocol tests. dispatch.zig imports server.zig and
-    // ../config/config.zig by relative path, so the module is rooted at src/
-    // via test_ipc_exports.zig; server.zig needs the "sys" module.
+    // IPC tests. The source-root shim keeps production-relative imports under
+    // src/ and receives the same "sys" module as the executable.
     const ipc_dispatch_mod = b.createModule(.{
         .root_source_file = b.path("src/test_ipc_exports.zig"),
         .target = target,
@@ -112,6 +111,19 @@ pub fn build(b: *std.Build) void {
     const ipc_test_step = b.step("test-ipc", "Run IPC hardening tests");
     ipc_test_step.dependOn(&run_ipc_tests.step);
     test_step.dependOn(&run_ipc_tests.step);
+
+    const ipc_connection_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/connection_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_connection_test_mod.addImport("ipc", ipc_dispatch_mod);
+    const ipc_connection_tests = b.addTest(.{
+        .root_module = ipc_connection_test_mod,
+    });
+    const run_ipc_connection_tests = b.addRunArtifact(ipc_connection_tests);
+    test_step.dependOn(&run_ipc_connection_tests.step);
+    ipc_test_step.dependOn(&run_ipc_connection_tests.step);
 
     // Effect mutation tests. effect.zig reaches into ../config/, so the
     // module is rooted at src/ via test_exports.zig.
