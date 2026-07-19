@@ -612,6 +612,19 @@ pub const App = struct {
                 dispatch.writeUnknownCommand(client_fd, verb);
                 return;
             },
+            error.UnexpectedArgument => {
+                const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+                const space = std.mem.indexOfScalar(u8, trimmed, ' ');
+                const verb = if (space) |index| trimmed[0..index] else trimmed;
+                var buf: [96]u8 = undefined;
+                const msg = std.fmt.bufPrint(
+                    &buf,
+                    "{s} does not accept arguments",
+                    .{verb},
+                ) catch "command does not accept arguments";
+                dispatch.writeError(client_fd, msg);
+                return;
+            },
             error.MissingArgument => {
                 const space = std.mem.indexOfScalar(u8, line, ' ');
                 const verb = if (space) |s| line[0..s] else line;

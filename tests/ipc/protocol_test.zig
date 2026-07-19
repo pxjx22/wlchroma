@@ -16,11 +16,19 @@ test "parseLine: reload with trailing whitespace" {
     try std.testing.expectEqual(IpcCommand.reload, cmd);
 }
 
+test "parseLine: reload rejects trailing argument" {
+    try std.testing.expectError(error.UnexpectedArgument, parseLine("reload now"));
+}
+
 // --- query ---
 
 test "parseLine: query" {
     const cmd = try parseLine("query");
     try std.testing.expectEqual(IpcCommand.query, cmd);
+}
+
+test "parseLine: query rejects trailing argument" {
+    try std.testing.expectError(error.UnexpectedArgument, parseLine("query verbose"));
 }
 
 test "parseLine: empty line → query" {
@@ -38,6 +46,10 @@ test "parseLine: whitespace-only line → query" {
 test "parseLine: stop" {
     const cmd = try parseLine("stop");
     try std.testing.expectEqual(IpcCommand.stop, cmd);
+}
+
+test "parseLine: stop rejects trailing argument" {
+    try std.testing.expectError(error.UnexpectedArgument, parseLine("stop now"));
 }
 
 // --- set-fps ---

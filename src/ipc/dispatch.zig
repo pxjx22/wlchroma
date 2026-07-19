@@ -34,6 +34,7 @@ pub const ParseError = error{
     UnknownCommand,
     BadArgument,
     MissingArgument,
+    UnexpectedArgument,
 };
 
 /// Parse a trimmed, newline-stripped command line into an IpcCommand.
@@ -50,10 +51,13 @@ pub fn parseLine(line: []const u8) ParseError!IpcCommand {
     const rest = if (space) |s| std.mem.trimStart(u8, trimmed[s + 1 ..], &std.ascii.whitespace) else "";
 
     if (std.mem.eql(u8, verb, "reload")) {
+        if (rest.len != 0) return error.UnexpectedArgument;
         return .reload;
     } else if (std.mem.eql(u8, verb, "query")) {
+        if (rest.len != 0) return error.UnexpectedArgument;
         return .query;
     } else if (std.mem.eql(u8, verb, "stop")) {
+        if (rest.len != 0) return error.UnexpectedArgument;
         return .stop;
     } else if (std.mem.eql(u8, verb, "set-fps")) {
         if (rest.len == 0) return error.MissingArgument;

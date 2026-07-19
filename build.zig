@@ -109,6 +109,8 @@ pub fn build(b: *std.Build) void {
         .root_module = ipc_test_mod,
     });
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
+    const ipc_test_step = b.step("test-ipc", "Run IPC hardening tests");
+    ipc_test_step.dependOn(&run_ipc_tests.step);
     test_step.dependOn(&run_ipc_tests.step);
 
     // Effect mutation tests. effect.zig reaches into ../config/, so the
