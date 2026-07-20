@@ -17,7 +17,8 @@ const FakeOps = struct {
     count: usize,
     app_wrapper_present: bool = true,
     surface_wrapper_present: [4]bool = @splat(true),
-    context_destroy_saw_wrappers: bool = false,
+    context_destroy_saw_app_wrapper: bool = false,
+    context_destroy_saw_surface_wrappers: [4]bool = @splat(false),
     events: [64]Event = undefined,
     events_len: usize = 0,
 
@@ -52,10 +53,10 @@ const FakeOps = struct {
     }
     pub fn destroyContext(self: *FakeOps) void {
         self.record(.destroy_context);
-        self.context_destroy_saw_wrappers = self.app_wrapper_present;
+        self.context_destroy_saw_app_wrapper = self.app_wrapper_present;
         for (0..self.count) |index| {
-            self.context_destroy_saw_wrappers =
-                self.context_destroy_saw_wrappers or self.surface_wrapper_present[index];
+            self.context_destroy_saw_surface_wrappers[index] =
+                self.surface_wrapper_present[index];
         }
     }
     pub fn clearHandles(self: *FakeOps) void {
@@ -69,6 +70,8 @@ const StartOps = struct {
     context_live: bool = false,
     failed: bool = false,
     ready_outputs: usize = 0,
+    create_succeeds: bool = true,
+    create_attempts: usize = 0,
     generations_created: usize = 0,
 
     pub fn hasContext(self: *StartOps) bool {
@@ -81,6 +84,11 @@ const StartOps = struct {
         return self.ready_outputs;
     }
     pub fn createContext(self: *StartOps) bool {
+        self.create_attempts += 1;
+        if (!self.create_succeeds) {
+            self.failed = true;
+            return false;
+        }
         self.generations_created += 1;
         self.context_live = true;
         return true;
@@ -98,6 +106,13 @@ fn firstTag(ops: *const FakeOps, tag: std.meta.Tag(Event)) ?usize {
     return null;
 }
 
+fn expectEvents(ops: *const FakeOps, expected: []const Event) !void {
+    try std.testing.expectEqual(expected.len, ops.events_len);
+    for (expected, ops.events[0..ops.events_len]) |expected_event, actual_event| {
+        try std.testing.expectEqualDeep(expected_event, actual_event);
+    }
+}
+
 test "current ownership requires both draw surface and context handles" {
     try std.testing.expect(!gpu_epoch.handlesMatch(@as(usize, 10), 10, @as(usize, 20), 21));
     try std.testing.expect(!gpu_epoch.handlesMatch(@as(usize, 10), 11, @as(usize, 20), 20));
@@ -112,25 +127,53 @@ test "acquireCurrent tries later candidates after the first failure" {
     try std.testing.expectEqual(@as(usize, 1), ops.events[1].try_current);
 }
 
-test "close invalidates borrows before deletion and destruction" {
-    var ops = FakeOps{ .successes = .{ true, false, false, false }, .count = 2 };
+test "close follows the exact successful lifecycle" {
+    var ops = FakeOps{ .successes = .{ false, true, false, false }, .count = 3 };
     gpu_epoch.close(FakeOps, &ops);
-    try std.testing.expectEqual(.detach_all, eventTag(ops.events[0]));
-    try std.testing.expect(firstTag(&ops, .delete_app_gl).? > 0);
-    try std.testing.expect(firstTag(&ops, .destroy_context).? > 0);
+    try expectEvents(&ops, &.{
+        .detach_all,
+        .{ .try_current = 0 },
+        .{ .try_current = 1 },
+        .delete_app_gl,
+        .{ .delete_surface_gl = 0 },
+        .{ .delete_surface_gl = 1 },
+        .{ .delete_surface_gl = 2 },
+        .clear_current,
+        .{ .destroy_surface = 0 },
+        .{ .destroy_surface = 1 },
+        .{ .destroy_surface = 2 },
+        .destroy_context,
+        .clear_handles,
+    });
+    try std.testing.expect(!ops.context_destroy_saw_app_wrapper);
+    for (0..ops.count) |index| {
+        try std.testing.expect(!ops.context_destroy_saw_surface_wrappers[index]);
+    }
 }
 
-test "close skips every GL deletion when all candidates fail" {
-    var ops = FakeOps{ .count = 2 };
+test "close follows the exact all-candidate-failure lifecycle" {
+    var ops = FakeOps{ .count = 3 };
     gpu_epoch.close(FakeOps, &ops);
-    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_app_gl));
-    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_surface_gl));
-    try std.testing.expect(firstTag(&ops, .destroy_context) != null);
-    try std.testing.expect(ops.context_destroy_saw_wrappers);
+    try expectEvents(&ops, &.{
+        .detach_all,
+        .{ .try_current = 0 },
+        .{ .try_current = 1 },
+        .{ .try_current = 2 },
+        .clear_current,
+        .{ .destroy_surface = 0 },
+        .{ .destroy_surface = 1 },
+        .{ .destroy_surface = 2 },
+        .destroy_context,
+        .clear_handles,
+    });
+    try std.testing.expect(ops.context_destroy_saw_app_wrapper);
+    for (0..ops.count) |index| {
+        try std.testing.expect(ops.context_destroy_saw_surface_wrappers[index]);
+    }
     try std.testing.expect(!ops.app_wrapper_present);
     try std.testing.expect(!ops.surface_wrapper_present[0]);
     try std.testing.expect(!ops.surface_wrapper_present[1]);
-    try std.testing.expect(firstTag(&ops, .destroy_context).? < firstTag(&ops, .clear_handles).?);
+    try std.testing.expect(!ops.surface_wrapper_present[2]);
 }
 
 test "close clears current before destroying any EGL surface" {
@@ -163,6 +206,25 @@ test "repeated idle effect switches allocate nothing and output return starts on
     try std.testing.expectEqual(@as(usize, 1), ops.generations_created);
     try std.testing.expect(gpu_epoch.start(StartOps, &ops));
     try std.testing.expectEqual(@as(usize, 1), ops.generations_created);
+}
+
+test "permanent failure with ready outputs never attempts context creation" {
+    var ops = StartOps{ .failed = true, .ready_outputs = 1 };
+    try std.testing.expect(!gpu_epoch.start(StartOps, &ops));
+    try std.testing.expectEqual(@as(usize, 0), ops.create_attempts);
+    try std.testing.expectEqual(@as(usize, 0), ops.generations_created);
+}
+
+test "context creation failure latches and is never retried" {
+    var ops = StartOps{ .ready_outputs = 1, .create_succeeds = false };
+    try std.testing.expect(!gpu_epoch.start(StartOps, &ops));
+    try std.testing.expectEqual(@as(usize, 1), ops.create_attempts);
+    try std.testing.expectEqual(@as(usize, 0), ops.generations_created);
+    try std.testing.expect(ops.failed);
+
+    try std.testing.expect(!gpu_epoch.start(StartOps, &ops));
+    try std.testing.expectEqual(@as(usize, 1), ops.create_attempts);
+    try std.testing.expectEqual(@as(usize, 0), ops.generations_created);
 }
 
 test "only permanent GPU failure forces a GPU-only effect to CPU" {
