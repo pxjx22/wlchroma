@@ -6,6 +6,7 @@ pub const Offscreen = struct {
     fbo: c.GLuint,
     tex: c.GLuint,
     extent: Extent,
+    filter: UpscaleFilter,
 
     pub fn init(extent: Extent, filter: UpscaleFilter) !Offscreen {
         var tex: c.GLuint = 0;
@@ -53,6 +54,7 @@ pub const Offscreen = struct {
             .fbo = fbo,
             .tex = tex,
             .extent = extent,
+            .filter = filter,
         };
     }
 

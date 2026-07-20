@@ -164,27 +164,6 @@ pub const App = struct {
             self.registry.layer_shell != null,
         });
 
-        self.egl_ctx = EglContext.init(self.display) catch |err| blk: {
-            std.debug.print("EGL init failed: {}, falling back to CPU path\n", .{err});
-            break :blk null;
-        };
-
-        // GPU-only effect fallback: if EGL is unavailable and the selected
-        // effect has no CPU path, override to colormix on the SHM path.
-        if (self.egl_ctx == null and self.effect.isGpuOnly()) {
-            std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
-            const colors = self.effect.gpuPalette().?;
-            const frame_advance_ms = self.effect.frameAdvanceMs();
-            const speed = self.effect.speed();
-            self.effect = Effect{ .colormix = ColormixRenderer.init(
-                colors[0],
-                colors[1],
-                colors[2],
-                frame_advance_ms,
-                speed,
-            ) };
-        }
-
         if (self.registry.compositor == null) return error.MissingCompositor;
         if (self.registry.shm == null) return error.MissingShm;
         if (self.registry.layer_shell == null) return error.MissingLayerShell;
@@ -208,6 +187,8 @@ pub const App = struct {
     /// libwayland callback (callbacks record facts; the loop acts on them).
     fn syncSurfaces(self: *App) void {
         self.reapSurfaces();
+        _ = self.startGpuEpoch();
+        self.applyPermanentGpuFallback();
 
         for (self.outputs.items) |out| {
             if (!out.done or out.removed) continue;
@@ -251,6 +232,7 @@ pub const App = struct {
         }
 
         self.ensureGpuPipeline();
+        self.applyPermanentGpuFallback();
         self.updateFrameTimer();
     }
 
@@ -464,6 +446,85 @@ pub const App = struct {
         }
     }
 
+    fn readyOutputCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.outputs.items) |output| {
+            if (output.done and !output.removed) count += 1;
+        }
+        return count;
+    }
+
+    const StartGpuEpochOps = struct {
+        app: *App,
+
+        pub fn hasContext(self: *StartGpuEpochOps) bool {
+            return self.app.egl_ctx != null;
+        }
+
+        pub fn permanentFailure(self: *StartGpuEpochOps) bool {
+            return self.app.gpu_pipeline_failed;
+        }
+
+        pub fn readyOutputCount(self: *StartGpuEpochOps) usize {
+            return self.app.readyOutputCount();
+        }
+
+        pub fn createContext(self: *StartGpuEpochOps) bool {
+            self.app.egl_ctx = EglContext.init(self.app.display) catch |err| {
+                std.debug.print("EGL init failed: {}, falling back to CPU path\n", .{err});
+                self.app.gpu_pipeline_failed = true;
+                return false;
+            };
+            return true;
+        }
+    };
+
+    fn startGpuEpoch(self: *App) bool {
+        var ops = StartGpuEpochOps{ .app = self };
+        return gpu_epoch.start(StartGpuEpochOps, &ops);
+    }
+
+    const CurrentGpuOps = struct {
+        app: *App,
+        ctx: *const EglContext,
+
+        pub fn candidateCount(self: *CurrentGpuOps) usize {
+            return self.app.surfaces.items.len;
+        }
+
+        pub fn tryMakeCurrent(self: *CurrentGpuOps, index: usize) bool {
+            const surface = self.app.surfaces.items[index];
+            if (surface.dead) return false;
+            const egl_surface = if (surface.egl_surface) |*value| value else return false;
+            return egl_surface.makeCurrent(self.ctx);
+        }
+    };
+
+    fn acquireGpuCurrent(self: *App, ctx: *const EglContext) bool {
+        var ops = CurrentGpuOps{ .app = self, .ctx = ctx };
+        return gpu_epoch.acquireCurrent(CurrentGpuOps, &ops);
+    }
+
+    fn applyPermanentGpuFallback(self: *App) void {
+        if (!gpu_epoch.requiresCpuFallback(
+            self.gpu_pipeline_failed,
+            self.effect.isGpuOnly(),
+        )) return;
+
+        std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
+        const colors = self.effect.gpuPalette().?;
+        const frame_advance_ms = self.effect.frameAdvanceMs();
+        const speed = self.effect.speed();
+        self.effect = Effect{ .colormix = ColormixRenderer.init(
+            colors[0],
+            colors[1],
+            colors[2],
+            frame_advance_ms,
+            speed,
+        ) };
+        for (self.surfaces.items) |surface| surface.shm_effect = null;
+    }
+
     fn surfaceForOutput(self: *App, out: *const OutputInfo) ?*SurfaceState {
         for (self.surfaces.items) |s| {
             if (s.output == out) return s;
@@ -545,46 +606,28 @@ pub const App = struct {
     fn switchEffect(self: *App, cfg: *const config_mod.AppConfig) void {
         // Tear down the old shader first so peak GPU object count stays flat
         // across repeated switches.
-        if (self.effect_shader) |*sh| {
-            var context_current = false;
+        if (self.effect_shader != null) {
             if (self.egl_ctx) |*ctx| {
-                for (self.surfaces.items) |s| {
-                    if (s.dead) continue;
-                    if (s.egl_surface) |*egl_surf| {
-                        if (egl_surf.makeCurrent(ctx)) {
-                            context_current = true;
-                            break;
-                        }
+                if (self.acquireGpuCurrent(ctx)) {
+                    self.effect_shader.?.deinit();
+                    self.effect_shader = null;
+                } else {
+                    std.debug.print("effect switch: no EGL surface could be made current; closing GPU epoch\n", .{});
+                    self.gpu_pipeline_failed = true;
+                    self.closeGpuEpoch();
+                    for (self.surfaces.items) |surface| {
+                        surface.configureCpuFallbackAfterDetach();
                     }
                 }
-            }
-            if (context_current) {
-                sh.deinit();
-            }
-            // Without a current-able surface (zero outputs) GL deletion is
-            // impossible; orphan the objects — they belong to the EGL context
-            // and are reclaimed when the context is destroyed.
-            self.effect_shader = null;
+            } else unreachable;
         }
 
         self.effect = Effect.init(cfg);
 
-        // Startup-parity fallback: a GPU-only effect with no usable GPU
-        // pipeline becomes colormix on the CPU path — same log line and
-        // semantics as setup().
-        if ((self.egl_ctx == null or self.gpu_pipeline_failed) and self.effect.isGpuOnly()) {
-            std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
-            const colors = self.effect.gpuPalette().?;
-            const frame_advance_ms = self.effect.frameAdvanceMs();
-            const speed = self.effect.speed();
-            self.effect = Effect{ .colormix = ColormixRenderer.init(
-                colors[0],
-                colors[1],
-                colors[2],
-                frame_advance_ms,
-                speed,
-            ) };
-        }
+        // Deliberate zero-output epoch closure remains recoverable. Only a
+        // permanent context or pipeline failure changes a GPU-only selection
+        // to its CPU fallback.
+        self.applyPermanentGpuFallback();
 
         // Per-surface CPU stand-ins were built from the old effect; drop them
         // so cpuEffect() rebuilds lazily from the new one.
@@ -1142,16 +1185,14 @@ pub const App = struct {
             s.renderer_scale = scale;
         }
         if (self.egl_ctx) |*ctx| {
-            if (scale < 1.0) {
+            if (scale < 1.0 and self.blit_shader == null and self.effect_shader != null) {
                 // Shader compilation needs a current EGL context, which is
                 // not guaranteed at IPC-handling time.
-                for (self.surfaces.items) |s| {
-                    if (s.dead) continue;
-                    if (s.egl_surface) |*egl_surf| {
-                        if (egl_surf.makeCurrent(ctx)) break;
-                    }
+                if (self.acquireGpuCurrent(ctx)) {
+                    self.ensureBlitShader();
+                } else {
+                    std.debug.print("set-scale: no EGL surface could be made current; blit shader creation deferred\n", .{});
                 }
-                self.ensureBlitShader();
             }
             const blit_available = self.blit_shader != null;
             for (self.surfaces.items) |s| {
@@ -1259,7 +1300,6 @@ pub const App = struct {
             self.upscale_filter = cfg.upscale_filter;
             for (self.surfaces.items) |surface| {
                 surface.upscale_filter = cfg.upscale_filter;
-                if (self.egl_ctx) |*ctx| surface.dropOffscreenForFilterChange(ctx);
             }
         }
 

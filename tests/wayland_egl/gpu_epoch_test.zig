@@ -97,6 +97,28 @@ const StartOps = struct {
     }
 };
 
+const ReplacementOps = struct {
+    acquire_succeeds: bool,
+    create_succeeds: bool,
+    owner: u32 = 11,
+    deleted_owner: ?u32 = null,
+    create_calls: usize = 0,
+
+    pub fn acquireCurrent(self: *ReplacementOps) bool {
+        return self.acquire_succeeds;
+    }
+    pub fn createReplacement(self: *ReplacementOps) !u32 {
+        self.create_calls += 1;
+        if (!self.create_succeeds) return error.InjectedCreationFailure;
+        return 22;
+    }
+    pub fn commitReplacement(self: *ReplacementOps, replacement: u32) void {
+        const old = self.owner;
+        self.owner = replacement;
+        self.deleted_owner = old;
+    }
+};
+
 fn eventTag(event: Event) std.meta.Tag(Event) {
     return std.meta.activeTag(event);
 }
@@ -259,4 +281,48 @@ test "only permanent GPU failure forces a GPU-only effect to CPU" {
     try std.testing.expect(!gpu_epoch.requiresCpuFallback(false, true));
     try std.testing.expect(!gpu_epoch.requiresCpuFallback(true, false));
     try std.testing.expect(gpu_epoch.requiresCpuFallback(true, true));
+}
+
+test "recoverable idle state does not latch fallback and restarts on return" {
+    const permanent_failure = false;
+    try std.testing.expect(!gpu_epoch.requiresCpuFallback(permanent_failure, true));
+    for (0..3) |_| {
+        try std.testing.expect(!gpu_epoch.shouldStart(false, permanent_failure, 0));
+    }
+    try std.testing.expect(gpu_epoch.shouldStart(false, permanent_failure, 1));
+}
+
+test "permanent context failure still forces a GPU-only effect to CPU" {
+    try std.testing.expect(gpu_epoch.requiresCpuFallback(true, true));
+    try std.testing.expect(!gpu_epoch.shouldStart(false, true, 1));
+}
+
+test "failed current acquisition retains ownership until context destruction" {
+    var ops = FakeOps{ .count = 2 };
+    gpu_epoch.close(FakeOps, &ops);
+    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_app_gl));
+    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_surface_gl));
+    try std.testing.expect(firstTag(&ops, .destroy_context).? < firstTag(&ops, .clear_handles).?);
+}
+
+test "replacement retains the old owner when acquisition fails" {
+    var ops = ReplacementOps{ .acquire_succeeds = false, .create_succeeds = true };
+    try std.testing.expect(!gpu_epoch.replaceCurrentOwned(ReplacementOps, &ops));
+    try std.testing.expectEqual(@as(u32, 11), ops.owner);
+    try std.testing.expectEqual(@as(?u32, null), ops.deleted_owner);
+    try std.testing.expectEqual(@as(usize, 0), ops.create_calls);
+}
+
+test "replacement retains the old owner when creation fails" {
+    var ops = ReplacementOps{ .acquire_succeeds = true, .create_succeeds = false };
+    try std.testing.expect(!gpu_epoch.replaceCurrentOwned(ReplacementOps, &ops));
+    try std.testing.expectEqual(@as(u32, 11), ops.owner);
+    try std.testing.expectEqual(@as(?u32, null), ops.deleted_owner);
+}
+
+test "replacement transfers ownership before deleting the old owner" {
+    var ops = ReplacementOps{ .acquire_succeeds = true, .create_succeeds = true };
+    try std.testing.expect(gpu_epoch.replaceCurrentOwned(ReplacementOps, &ops));
+    try std.testing.expectEqual(@as(u32, 22), ops.owner);
+    try std.testing.expectEqual(@as(?u32, 11), ops.deleted_owner);
 }

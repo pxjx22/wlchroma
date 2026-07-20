@@ -10,6 +10,7 @@ const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
 const EglSurface = @import("../render/egl_surface.zig").EglSurface;
 const EglContext = @import("../render/egl_context.zig").EglContext;
+const gpu_epoch = @import("../render/gpu_epoch.zig");
 const shader_mod = @import("../render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const Offscreen = @import("../render/offscreen.zig").Offscreen;
@@ -320,7 +321,17 @@ pub const SurfaceState = struct {
                 return;
             };
             if (self.offscreen) |*ofs| {
-                if (!ofs.resize(render_extent)) {
+                if (ofs.filter != self.upscale_filter) {
+                    var replacement_ops = OffscreenReplacementOps{
+                        .surface = self,
+                        .ctx = ctx,
+                        .extent = render_extent,
+                        .filter = self.upscale_filter,
+                    };
+                    if (!gpu_epoch.replaceCurrentOwned(OffscreenReplacementOps, &replacement_ops)) {
+                        std.debug.print("set-scale: offscreen filter replacement deferred on output {}\n", .{self.output.registry_name});
+                    }
+                } else if (!ofs.resize(render_extent)) {
                     std.debug.print("set-scale: FBO incomplete after resize, disabling offscreen on output {}\n", .{self.output.registry_name});
                     ofs.deinit();
                     self.offscreen = null;
@@ -337,21 +348,27 @@ pub const SurfaceState = struct {
         }
     }
 
-    /// Drop the offscreen FBO so the next applyRendererScale call recreates
-    /// it. Used when upscale_filter changes: the filter is baked into the
-    /// texture parameters at creation, so a resize is not enough.
-    pub fn dropOffscreenForFilterChange(self: *SurfaceState, ctx: *const EglContext) void {
-        if (self.dead) return;
-        const ofs = if (self.offscreen) |*o| o else return;
-        var gl_ok = false;
-        if (self.egl_surface) |*egl_surf| {
-            gl_ok = egl_surf.makeCurrent(ctx);
+    const OffscreenReplacementOps = struct {
+        surface: *SurfaceState,
+        ctx: *const EglContext,
+        extent: Extent,
+        filter: UpscaleFilter,
+
+        pub fn acquireCurrent(self: *OffscreenReplacementOps) bool {
+            const egl_surface = if (self.surface.egl_surface) |*value| value else return false;
+            return egl_surface.makeCurrent(self.ctx);
         }
-        // On makeCurrent failure the GL objects are orphaned to the context
-        // (reclaimed when the context is destroyed).
-        if (gl_ok) ofs.deinit();
-        self.offscreen = null;
-    }
+
+        pub fn createReplacement(self: *OffscreenReplacementOps) !Offscreen {
+            return Offscreen.init(self.extent, self.filter);
+        }
+
+        pub fn commitReplacement(self: *OffscreenReplacementOps, replacement: Offscreen) void {
+            var old = self.surface.offscreen.?;
+            self.surface.offscreen = replacement;
+            old.deinit();
+        }
+    };
 
     fn cpuEffect(self: *SurfaceState) *Effect {
         if (self.effect.isGpuOnly()) {
