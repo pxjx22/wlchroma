@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19
 
-**Status:** Approved design; implementation plan ready
+**Status:** Implemented and verified
 
 **Audit mapping:** `IPC-H1`, `IPC-H2`, `IPC-M1`, `IPC-L1`, `IPC-L2`, `IPC-L3`, `APP-L1`
 

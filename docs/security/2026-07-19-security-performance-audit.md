@@ -38,13 +38,13 @@ Each phase receives its own approved design, TDD implementation plan, focused co
 
 | ID | Severity | Phase | Finding | Status |
 |---|---|---:|---|---|
-| IPC-H1 | High | 1 | Client-triggered `SIGPIPE` can terminate the daemon | Open |
-| IPC-H2 | High | 1 | Per-read timeout permits slow-client main-thread starvation | Open |
-| IPC-M1 | Medium | 1 | A second daemon can steal and later remove the live socket path | Open |
-| IPC-L1 | Low | 1 | Response writes do not handle partial success | Open |
-| IPC-L2 | Low | 1 | The documented 4096-byte line boundary is off by one | Open |
-| IPC-L3 | Low | 1 | No-argument commands accept ignored trailing arguments | Open |
-| APP-L1 | Low | 1 | Signalfd data is read from an undefined buffer without validating read length | Open |
+| IPC-H1 | High | 1 | Client-triggered `SIGPIPE` can terminate the daemon | Fixed (`4d4fd3e`, `49a82b5`) |
+| IPC-H2 | High | 1 | Per-read timeout permits slow-client main-thread starvation | Fixed (`a50a8c8`, `a44845a`, `4d4fd3e`, `49a82b5`) |
+| IPC-M1 | Medium | 1 | A second daemon can steal and later remove the live socket path | Fixed (`a44845a`, `49a82b5`) |
+| IPC-L1 | Low | 1 | Response writes do not handle partial success | Fixed (`a50a8c8`, `4d4fd3e`, `49a82b5`) |
+| IPC-L2 | Low | 1 | The documented 4096-byte line boundary is off by one | Fixed (`a50a8c8`, `49a82b5`) |
+| IPC-L3 | Low | 1 | No-argument commands accept ignored trailing arguments | Fixed (`f4fcb58`) |
+| APP-L1 | Low | 1 | Signalfd data is read from an undefined buffer without validating read length | Fixed (`18d7cec`, `49a82b5`) |
 | WL-H1 | High | 2 | GPU fallback can leave a stale borrowed EGL-context pointer | Open |
 | WL-H2 | High | 2 | Compositor dimensions reach C APIs without checked narrowing | Open |
 | GPU-M1 | Medium | 2 | Zero-output effect switching leaks shader programs and VBOs | Open |
@@ -183,3 +183,15 @@ Live output-off/hotplug fault injection was not performed during the read-only a
 ## Completion Record
 
 Update the finding ledger and append phase verification evidence as fixes land. Do not rewrite the original finding descriptions; they are the stable audit baseline.
+
+### Phase 1: IPC hardening — 2026-07-20
+
+- **Disposition:** `IPC-H1`, `IPC-H2`, `IPC-M1`, `IPC-L1`, `IPC-L2`, `IPC-L3`, and `APP-L1` are fixed. Their original descriptions remain unchanged in the ledger.
+- **Implementation commits:** `f4fcb58` (strict no-argument arity), `a50a8c8` (bounded framing/response/deadline primitives), `a44845a` (singleton lock and nonblocking listener), `4d4fd3e` (nonblocking SIGPIPE-safe client I/O), `18d7cec` (exact signalfd record reader), and `49a82b5` (main poll-loop integration and legacy-path removal).
+- **Formatting:** `zig fmt --check build.zig src tests` exited zero.
+- **Debug:** executable build `9/9`; full test graph `19/19`, `89/89` tests passed.
+- **ReleaseSafe:** executable build `9/9`; full test graph `19/19`, `89/89` tests passed.
+- **ReleaseFast:** executable build `9/9`; full test graph `19/19`, `89/89` tests passed.
+- **Static evidence:** `git diff --check` passed; the legacy IPC scan found no `readLine`, `writeLine`, `writev`, `LINE_MAX`, `SO_RCVTIMEO`, direct dispatch writer, or fd-taking command handler.
+- **Review evidence:** Tasks 1–5 passed read-only implementation reviews; Task 4 also passed a separate adversarial I/O audit. Two independent Task 6 review attempts terminated at the provider usage limit, so the controller completed a documented line-by-line fallback review of the 1,211-line package with no Critical, Important, or Minor findings.
+- **Live scope:** no daemon was running after the laptop reboot, so the optional existing-daemon `wlchroma-ctl query` smoke test was skipped. No daemon was started, stopped, or replaced, and no display was disabled.
