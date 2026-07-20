@@ -1,5 +1,6 @@
 const std = @import("std");
 const wayland = @import("wayland_test");
+const App = wayland.app.App;
 const SurfaceState = wayland.surface_state.SurfaceState;
 
 fn setDetachFields(state: *SurfaceState, dead: bool, configured: bool, has_extent: bool) void {
@@ -42,4 +43,27 @@ test "unconfigured surface invalidates its context borrow" {
     var state: SurfaceState = undefined;
     setDetachFields(&state, false, false, true);
     try expectDetached(&state);
+}
+
+test "retiring CPU-only last surface clears App cleanup scratch" {
+    var app: App = undefined;
+    app.surfaces = .empty;
+    app.detached_gpu = .empty;
+    defer app.detached_gpu.deinit(std.testing.allocator);
+    try app.detached_gpu.ensureTotalCapacity(std.testing.allocator, 1);
+    app.egl_ctx = null;
+    app.effect_shader = null;
+    app.blit_shader = null;
+
+    var state: SurfaceState = undefined;
+    state.egl_ctx = null;
+    state.egl_surface = null;
+    state.offscreen = null;
+
+    App.TestAdapter.retireSurfaceGpu(&app, &state);
+
+    try std.testing.expectEqual(@as(usize, 0), app.detached_gpu.items.len);
+    try std.testing.expect(state.egl_ctx == null);
+    try std.testing.expect(state.egl_surface == null);
+    try std.testing.expect(state.offscreen == null);
 }

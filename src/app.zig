@@ -29,6 +29,12 @@ const signal_fd = @import("signal_fd.zig");
 const sys = @import("sys");
 
 pub const App = struct {
+    pub const TestAdapter = if (builtin.is_test) struct {
+        pub fn retireSurfaceGpu(app: *App, surface: *SurfaceState) void {
+            app.retireSurfaceGpu(surface);
+        }
+    } else void;
+
     allocator: std.mem.Allocator,
     /// Io interface and environment from std.process.Init, retained for
     /// config reloads (file reads and XDG path resolution).
@@ -323,6 +329,13 @@ pub const App = struct {
         const detached_index = self.detached_gpu.items.len;
         self.detached_gpu.appendAssumeCapacity(surface.detachGpu());
         const detached = &self.detached_gpu.items[detached_index];
+
+        if (self.egl_ctx == null) {
+            std.debug.assert(detached.egl_surface == null);
+            std.debug.assert(detached.offscreen == null);
+            _ = self.detached_gpu.pop();
+            return;
+        }
 
         if (self.surfaces.items.len == 0) {
             self.closeGpuEpoch();
