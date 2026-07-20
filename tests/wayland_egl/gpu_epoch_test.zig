@@ -75,6 +75,7 @@ const StartOps = struct {
     create_succeeds: bool = true,
     create_attempts: usize = 0,
     generations_created: usize = 0,
+    ready_output_queries: usize = 0,
 
     pub fn hasContext(self: *StartOps) bool {
         return self.context_live;
@@ -83,6 +84,7 @@ const StartOps = struct {
         return self.failed;
     }
     pub fn readyOutputCount(self: *StartOps) usize {
+        self.ready_output_queries += 1;
         return self.ready_outputs;
     }
     pub fn createContext(self: *StartOps) bool {
@@ -256,6 +258,20 @@ test "repeated idle effect switches allocate nothing and output return starts on
     try std.testing.expectEqual(@as(usize, 1), ops.generations_created);
     try std.testing.expect(gpu_epoch.start(StartOps, &ops));
     try std.testing.expectEqual(@as(usize, 1), ops.generations_created);
+}
+
+test "active context returns without querying ready outputs" {
+    var ops = StartOps{ .context_live = true, .ready_outputs = 1 };
+    try std.testing.expect(gpu_epoch.start(StartOps, &ops));
+    try std.testing.expectEqual(@as(usize, 0), ops.ready_output_queries);
+    try std.testing.expectEqual(@as(usize, 0), ops.create_attempts);
+}
+
+test "permanent failure returns without querying ready outputs" {
+    var ops = StartOps{ .failed = true, .ready_outputs = 1 };
+    try std.testing.expect(!gpu_epoch.start(StartOps, &ops));
+    try std.testing.expectEqual(@as(usize, 0), ops.ready_output_queries);
+    try std.testing.expectEqual(@as(usize, 0), ops.create_attempts);
 }
 
 test "permanent failure with ready outputs never attempts context creation" {

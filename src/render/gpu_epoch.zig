@@ -33,11 +33,9 @@ pub fn shouldStart(has_context: bool, permanent_failure: bool, ready_outputs: us
 }
 
 pub fn start(comptime Ops: type, ops: *Ops) bool {
-    if (!shouldStart(
-        ops.hasContext(),
-        ops.permanentFailure(),
-        ops.readyOutputCount(),
-    )) return ops.hasContext();
+    if (ops.hasContext()) return true;
+    if (ops.permanentFailure()) return false;
+    if (ops.readyOutputCount() == 0) return false;
     return ops.createContext();
 }
 
