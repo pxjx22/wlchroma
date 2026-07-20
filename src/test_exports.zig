@@ -7,3 +7,4 @@ pub const config = @import("config/config.zig");
 pub const defaults = @import("config/defaults.zig");
 pub const color_fade = @import("render/color_fade.zig");
 pub const dimensions = @import("wayland/dimensions.zig");
+pub const gpu_epoch = @import("render/gpu_epoch.zig");
