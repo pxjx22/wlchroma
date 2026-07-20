@@ -80,3 +80,16 @@ test "scaled extent stays nonzero and within the signed ABI" {
     try std.testing.expectEqual(@as(u32, 1), tiny.width);
     try std.testing.expectEqual(@as(u32, 1), tiny.height);
 }
+
+test "buffer ranges exactly partition the stored mapping" {
+    const layout = try dimensions.ShmLayout.init(try dimensions.Extent.init(8, 4));
+    try std.testing.expectEqual(dimensions.BufferRange{ .start = 0, .end = 128 }, layout.bufferRange(0));
+    try std.testing.expectEqual(dimensions.BufferRange{ .start = 128, .end = 256 }, layout.bufferRange(1));
+    try std.testing.expectEqual(layout.total_bytes, layout.bufferRange(1).end);
+}
+
+test "scaled C dimensions are produced once by the checked extent" {
+    const scaled = try (try dimensions.Extent.init(3840, 2160)).scaled(0.5);
+    try std.testing.expectEqual(@as(i32, 1920), scaled.c_width);
+    try std.testing.expectEqual(@as(i32, 1080), scaled.c_height);
+}

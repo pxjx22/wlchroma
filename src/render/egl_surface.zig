@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("../wl.zig").c;
 const EglContext = @import("egl_context.zig").EglContext;
+const Extent = @import("../wayland/dimensions.zig").Extent;
 
 comptime {
     // EGLNativeWindowType is c_ulong on Wayland/X11 EGL platforms.
@@ -20,10 +21,9 @@ pub const EglSurface = struct {
     pub fn create(
         ctx: *const EglContext,
         wl_surface: *c.wl_surface,
-        width: u32,
-        height: u32,
+        extent: Extent,
     ) !EglSurface {
-        const egl_window = c.wl_egl_window_create(wl_surface, @intCast(width), @intCast(height)) orelse return error.EglWindowCreateFailed;
+        const egl_window = c.wl_egl_window_create(wl_surface, extent.c_width, extent.c_height) orelse return error.EglWindowCreateFailed;
         errdefer c.wl_egl_window_destroy(egl_window);
 
         // EGLNativeWindowType is c_ulong on X11/Wayland-EGL platforms,
@@ -45,8 +45,8 @@ pub const EglSurface = struct {
         };
     }
 
-    pub fn resize(self: *EglSurface, width: u32, height: u32) void {
-        c.wl_egl_window_resize(self.egl_window, @intCast(width), @intCast(height), 0, 0);
+    pub fn resize(self: *EglSurface, extent: Extent) void {
+        c.wl_egl_window_resize(self.egl_window, extent.c_width, extent.c_height, 0, 0);
     }
 
     /// Make this surface current for GLES rendering on the calling thread.

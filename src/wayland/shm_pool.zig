@@ -2,27 +2,19 @@ const std = @import("std");
 const c = @import("../wl.zig").c;
 const posix = std.posix;
 const sys = @import("sys");
+const ShmLayout = @import("dimensions.zig").ShmLayout;
 
 pub const ShmPool = struct {
     pool: ?*c.wl_shm_pool,
     buffers: [2]?*c.wl_buffer,
     busy: [2]bool,
     mmap_ptr: [*]u8,
-    buf_size: usize,
+    layout: ShmLayout,
+    total_bytes: usize,
     fd: posix.fd_t,
 
-    pub fn init(shm: *c.wl_shm, width: u32, height: u32) !ShmPool {
-        // Use usize for stride to prevent u32 overflow on extreme resolutions.
-        const stride: usize = @as(usize, width) * 4; // XRGB8888
-        const buf_size: usize = stride * @as(usize, height);
-        const total_size = buf_size * 2;
-
-        // Guard against i32 overflow: wl_shm_create_pool takes i32 size.
-        if (total_size > @as(usize, @intCast(std.math.maxInt(i32)))) {
-            return error.ShmTooLarge;
-        }
-
-        var self = try initResources(shm, width, height, stride, buf_size, total_size);
+    pub fn init(shm: *c.wl_shm, layout: ShmLayout) !ShmPool {
+        var self = try initResources(shm, layout);
         // deinit handles all cleanup: buffers (null-checked), pool, mmap, fd.
         // Partial failure (e.g. buffer[1] create fails after buffer[0] succeeds)
         // is safe because initResources returns buffers = {null, null} and deinit
@@ -30,13 +22,12 @@ pub const ShmPool = struct {
         errdefer self.deinit();
 
         for (0..2) |i| {
-            const offset: i32 = @intCast(i * buf_size);
             const buf = c.wl_shm_pool_create_buffer(
                 self.pool.?,
-                offset,
-                @intCast(width),
-                @intCast(height),
-                @intCast(stride),
+                layout.offsets[i],
+                layout.extent.c_width,
+                layout.extent.c_height,
+                layout.stride,
                 c.WL_SHM_FORMAT_XRGB8888,
             ) orelse return error.BufferCreateFailed;
             self.buffers[i] = buf;
@@ -50,24 +41,16 @@ pub const ShmPool = struct {
     /// without risking double-close of fd or double-munmap.
     fn initResources(
         shm: *c.wl_shm,
-        width: u32,
-        height: u32,
-        stride: usize,
-        buf_size: usize,
-        total_size: usize,
+        layout: ShmLayout,
     ) !ShmPool {
-        _ = width;
-        _ = height;
-        _ = stride;
-
         const fd = try posix.memfd_create("wlchroma-shm", 1);
         errdefer sys.close(fd);
 
-        try sys.ftruncate(fd, total_size);
+        try sys.ftruncate(fd, layout.total_bytes);
 
         const mmap_result = try posix.mmap(
             null,
-            total_size,
+            layout.total_bytes,
             .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             fd,
@@ -75,7 +58,7 @@ pub const ShmPool = struct {
         );
         errdefer posix.munmap(mmap_result);
 
-        const pool = c.wl_shm_create_pool(shm, @as(i32, @intCast(fd)), @as(i32, @intCast(total_size))) orelse {
+        const pool = c.wl_shm_create_pool(shm, @as(i32, @intCast(fd)), @intCast(layout.total_bytes)) orelse {
             return error.ShmPoolFailed;
         };
 
@@ -86,7 +69,8 @@ pub const ShmPool = struct {
             .buffers = .{ null, null },
             .busy = .{ false, false },
             .mmap_ptr = @ptrCast(mmap_result.ptr),
-            .buf_size = buf_size,
+            .layout = layout,
+            .total_bytes = layout.total_bytes,
             .fd = fd,
         };
     }
@@ -113,8 +97,7 @@ pub const ShmPool = struct {
             if (buf) |b| c.wl_buffer_destroy(b);
         }
         if (self.pool) |p| c.wl_shm_pool_destroy(p);
-        const total = self.buf_size * 2;
-        posix.munmap(@as([*]align(std.heap.page_size_min) u8, @alignCast(self.mmap_ptr))[0..total]);
+        posix.munmap(@as([*]align(std.heap.page_size_min) u8, @alignCast(self.mmap_ptr))[0..self.total_bytes]);
         sys.close(self.fd);
     }
 
@@ -132,8 +115,8 @@ pub const ShmPool = struct {
     }
 
     pub fn pixelSlice(self: *ShmPool, idx: u1) []u8 {
-        const offset = @as(usize, idx) * self.buf_size;
-        return self.mmap_ptr[offset .. offset + self.buf_size];
+        const range = self.layout.bufferRange(idx);
+        return self.mmap_ptr[range.start..range.end];
     }
 
     pub fn wlBuffer(self: *ShmPool, idx: u1) *c.wl_buffer {

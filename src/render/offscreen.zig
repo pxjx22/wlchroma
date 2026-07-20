@@ -1,13 +1,13 @@
 const c = @import("../wl.zig").c;
 const UpscaleFilter = @import("../config/config.zig").UpscaleFilter;
+const Extent = @import("../wayland/dimensions.zig").Extent;
 
 pub const Offscreen = struct {
     fbo: c.GLuint,
     tex: c.GLuint,
-    width: u32,
-    height: u32,
+    extent: Extent,
 
-    pub fn init(w: u32, h: u32, filter: UpscaleFilter) !Offscreen {
+    pub fn init(extent: Extent, filter: UpscaleFilter) !Offscreen {
         var tex: c.GLuint = 0;
         c.glGenTextures(1, &tex);
         if (tex == 0) return error.GlGenTexturesFailed;
@@ -27,8 +27,8 @@ pub const Offscreen = struct {
             c.GL_TEXTURE_2D,
             0,
             c.GL_RGBA,
-            @intCast(w),
-            @intCast(h),
+            extent.c_width,
+            extent.c_height,
             0,
             c.GL_RGBA,
             c.GL_UNSIGNED_BYTE,
@@ -52,8 +52,7 @@ pub const Offscreen = struct {
         return Offscreen{
             .fbo = fbo,
             .tex = tex,
-            .width = w,
-            .height = h,
+            .extent = extent,
         };
     }
 
@@ -61,19 +60,18 @@ pub const Offscreen = struct {
     /// only the texture storage changes via glTexImage2D.
     /// Returns false if the FBO is incomplete after resize (caller should
     /// destroy this Offscreen and fall back to direct rendering).
-    pub fn resize(self: *Offscreen, w: u32, h: u32) bool {
+    pub fn resize(self: *Offscreen, extent: Extent) bool {
         // Early-return if dimensions have not changed.
-        if (self.width == w and self.height == h) return true;
+        if (self.extent.width == extent.width and self.extent.height == extent.height) return true;
 
-        self.width = w;
-        self.height = h;
+        self.extent = extent;
         c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
         c.glTexImage2D(
             c.GL_TEXTURE_2D,
             0,
             c.GL_RGBA,
-            @intCast(w),
-            @intCast(h),
+            extent.c_width,
+            extent.c_height,
             0,
             c.GL_RGBA,
             c.GL_UNSIGNED_BYTE,

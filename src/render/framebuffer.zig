@@ -1,4 +1,5 @@
 const defaults = @import("../config/defaults.zig");
+const Extent = @import("../wayland/dimensions.zig").Extent;
 pub const Rgb = defaults.Rgb;
 
 /// Expand cell_grid (grid_w * grid_h Rgb values, indexed [x * grid_h + y])
@@ -11,11 +12,10 @@ pub fn expandCells(
     grid_w: usize,
     grid_h: usize,
     pixel_buf: []u8,
-    w: u32,
-    h: u32,
+    extent: Extent,
 ) void {
-    const pw: usize = w;
-    const ph: usize = h;
+    const pw: usize = extent.width;
+    const ph: usize = extent.height;
 
     for (0..grid_h) |cy| {
         const py_start = cy * defaults.CELL_H;

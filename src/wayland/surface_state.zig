@@ -14,6 +14,9 @@ const shader_mod = @import("../render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const Offscreen = @import("../render/offscreen.zig").Offscreen;
 const UpscaleFilter = @import("../config/config.zig").UpscaleFilter;
+const dimensions = @import("dimensions.zig");
+const Extent = dimensions.Extent;
+const ShmLayout = dimensions.ShmLayout;
 
 /// Context passed as userdata to each wl_buffer release listener.
 pub const BufReleaseCtx = struct {
@@ -34,8 +37,7 @@ pub const SurfaceState = struct {
     cell_grid: []defaults.Rgb,
     grid_w: usize,
     grid_h: usize,
-    pixel_w: u32,
-    pixel_h: u32,
+    extent: ?Extent,
     configured: bool,
     display: *c.wl_display,
     frame_callback: ?*c.wl_callback,
@@ -90,6 +92,10 @@ pub const SurfaceState = struct {
         errdefer layer_surf.destroy();
 
         const self = try allocator.create(SurfaceState);
+        const initial_extent: ?Extent = if (output.width > 0 and output.height > 0)
+            Extent.init(@intCast(output.width), @intCast(output.height)) catch null
+        else
+            null;
         self.* = SurfaceState{
             .allocator = allocator,
             .output = output,
@@ -101,8 +107,7 @@ pub const SurfaceState = struct {
             .cell_grid = &.{},
             .grid_w = 0,
             .grid_h = 0,
-            .pixel_w = @intCast(@max(0, output.width)),
-            .pixel_h = @intCast(@max(0, output.height)),
+            .extent = initial_extent,
             .configured = false,
             .display = display,
             .frame_callback = null,
@@ -130,6 +135,7 @@ pub const SurfaceState = struct {
     pub fn renderTick(self: *SurfaceState, shader: ?*const EffectShader, blit_shader: ?*const BlitShader) void {
         if (self.dead) return;
         if (!self.configured) return;
+        const extent = self.extent orelse return;
 
         if (self.frame_callback != null) return;
 
@@ -150,22 +156,22 @@ pub const SurfaceState = struct {
                     if (blit_shader) |bs| {
                         // Offscreen pass: render at reduced resolution
                         ofs.bind();
-                        c.glViewport(0, 0, @intCast(ofs.width), @intCast(ofs.height));
-                        sh.setUniforms(self.effect, @floatFromInt(ofs.width), @floatFromInt(ofs.height));
+                        c.glViewport(0, 0, ofs.extent.c_width, ofs.extent.c_height);
+                        sh.setUniforms(self.effect, @floatFromInt(ofs.extent.width), @floatFromInt(ofs.extent.height));
                         sh.draw();
 
                         // Upscale pass: blit FBO texture to default framebuffer
                         ofs.unbind();
-                        c.glViewport(0, 0, @intCast(self.pixel_w), @intCast(self.pixel_h));
+                        c.glViewport(0, 0, extent.c_width, extent.c_height);
                         bs.draw(ofs.tex, sh.glProgram(), sh.glVbo(), sh.glAPosLoc());
                     } else {
                         // Blit shader unavailable -- fall back to direct rendering
-                        sh.setUniforms(self.effect, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
+                        sh.setUniforms(self.effect, @floatFromInt(extent.width), @floatFromInt(extent.height));
                         sh.draw();
                     }
                 } else {
                     // Direct render at full resolution (scale == 1.0)
-                    sh.setUniforms(self.effect, @floatFromInt(self.pixel_w), @floatFromInt(self.pixel_h));
+                    sh.setUniforms(self.effect, @floatFromInt(extent.width), @floatFromInt(extent.height));
                     sh.draw();
                 }
             } else {
@@ -199,7 +205,7 @@ pub const SurfaceState = struct {
         }
         const cpu_effect = self.cpuEffect();
         cpu_effect.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
-        framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), self.pixel_w, self.pixel_h);
+        framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), extent);
 
         c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
         c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
@@ -290,6 +296,7 @@ pub const SurfaceState = struct {
     /// EGL surface; makes it current for the GL object work.
     pub fn applyRendererScale(self: *SurfaceState, ctx: *const EglContext, blit_available: bool) void {
         if (self.dead or !self.configured) return;
+        const extent = self.extent orelse return;
         const egl_surf = if (self.egl_surface) |*e| e else return;
         if (!egl_surf.makeCurrent(ctx)) {
             std.debug.print("set-scale: makeCurrent failed on output {}, deferring to next configure\n", .{self.output.registry_name});
@@ -297,16 +304,18 @@ pub const SurfaceState = struct {
         }
 
         if (self.renderer_scale < 1.0 and blit_available) {
-            const rw = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(self.pixel_w)) * self.renderer_scale)));
-            const rh = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(self.pixel_h)) * self.renderer_scale)));
+            const render_extent = extent.scaled(self.renderer_scale) catch |err| {
+                std.debug.print("set-scale: invalid scaled extent on output {}: {}, rendering at full resolution\n", .{ self.output.registry_name, err });
+                return;
+            };
             if (self.offscreen) |*ofs| {
-                if (!ofs.resize(rw, rh)) {
+                if (!ofs.resize(render_extent)) {
                     std.debug.print("set-scale: FBO incomplete after resize, disabling offscreen on output {}\n", .{self.output.registry_name});
                     ofs.deinit();
                     self.offscreen = null;
                 }
             } else {
-                self.offscreen = Offscreen.init(rw, rh, self.upscale_filter) catch |err| blk: {
+                self.offscreen = Offscreen.init(render_extent, self.upscale_filter) catch |err| blk: {
                     std.debug.print("set-scale: Offscreen.init failed on output {}: {}, rendering at full resolution\n", .{ self.output.registry_name, err });
                     break :blk null;
                 };
@@ -335,9 +344,7 @@ pub const SurfaceState = struct {
 
     pub fn forceCpuFallback(self: *SurfaceState) void {
         if (self.dead) return;
-        const pw = self.pixel_w;
-        const ph = self.pixel_h;
-        if (pw == 0 or ph == 0) return;
+        const extent = self.extent orelse return;
 
         if (self.offscreen) |*ofs| {
             var gl_ok = false;
@@ -354,7 +361,10 @@ pub const SurfaceState = struct {
             self.egl_surface = null;
         }
         self.egl_ctx = null;
-        self.configureShmFallback(pw, ph);
+        self.configureShmFallback(extent) catch |err| {
+            std.debug.print("force CPU fallback: configureShmFallback failed: {}\n", .{err});
+            self.configured = false;
+        };
     }
 
     fn cpuEffect(self: *SurfaceState) *Effect {
@@ -381,33 +391,36 @@ pub const SurfaceState = struct {
         }
     }
 
-    fn configureShmFallback(self: *SurfaceState, pw: u32, ph: u32) void {
-        // --- SHM/CPU fallback path ---
-        const grid_w = @max(@divFloor(pw, @as(u32, defaults.CELL_W)), 1);
-        const grid_h = @max(@divFloor(ph, @as(u32, defaults.CELL_H)), 1);
-        self.grid_w = grid_w;
-        self.grid_h = grid_h;
+    fn configureShmFallback(self: *SurfaceState, extent: Extent) !void {
+        const layout = try ShmLayout.init(extent);
+        const wl_surface = self.layer_surface.wl_surface orelse return error.MissingWlSurface;
 
-        if (self.cell_grid.len > 0) {
-            self.allocator.free(self.cell_grid);
-            self.cell_grid = &.{};
-        }
-        self.cell_grid = self.allocator.alloc(defaults.Rgb, grid_w * grid_h) catch {
-            std.debug.print("OOM allocating cell_grid\n", .{});
-            self.configured = false;
-            return;
-        };
+        const new_grid = try self.allocator.alloc(defaults.Rgb, layout.grid_len);
+        errdefer self.allocator.free(new_grid);
+        var new_pool = try ShmPool.init(self.shm, layout);
+        errdefer new_pool.deinit();
 
-        if (self.shm_pool) |*old| {
-            old.deinit();
-            self.shm_pool = null;
-            self.buf_ctx = undefined;
+        self.cpuEffect().renderGrid(layout.grid_w, layout.grid_h, new_grid);
+        const first = new_pool.acquireBuffer() orelse return error.NoFreeShmBuffer;
+        framebuffer.expandCells(
+            new_grid,
+            layout.grid_w,
+            layout.grid_h,
+            new_pool.pixelSlice(first),
+            extent,
+        );
+
+        if (self.frame_callback) |old_callback| {
+            c.wl_callback_destroy(old_callback);
+            self.frame_callback = null;
         }
-        self.shm_pool = ShmPool.init(self.shm, pw, ph) catch {
-            std.debug.print("failed to create ShmPool\n", .{});
-            self.configured = false;
-            return;
-        };
+        if (self.shm_pool) |*old_pool| old_pool.deinit();
+        if (self.cell_grid.len > 0) self.allocator.free(self.cell_grid);
+
+        self.shm_pool = new_pool;
+        self.cell_grid = new_grid;
+        self.grid_w = layout.grid_w;
+        self.grid_h = layout.grid_h;
         self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
         self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
         self.shm_pool.?.attachListeners(
@@ -416,33 +429,17 @@ pub const SurfaceState = struct {
             @ptrCast(&self.buf_ctx[1]),
         );
 
-        const cpu_effect = self.cpuEffect();
-        cpu_effect.renderGrid(grid_w, grid_h, self.cell_grid);
-
-        var pool = &(self.shm_pool.?);
-        const idx = pool.acquireBuffer() orelse {
-            std.debug.print("no free buffer on configure\n", .{});
-            return;
-        };
-
-        framebuffer.expandCells(self.cell_grid, grid_w, grid_h, pool.pixelSlice(idx), pw, ph);
-
-        const wl_surface = self.layer_surface.wl_surface orelse return;
-        c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
+        c.wl_surface_attach(wl_surface, self.shm_pool.?.wlBuffer(first), 0, 0);
         c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-
-        if (self.frame_callback) |old_cb| c.wl_callback_destroy(old_cb);
-        if (c.wl_surface_frame(wl_surface)) |cb| {
-            self.frame_callback = cb;
-            _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
+        if (c.wl_surface_frame(wl_surface)) |callback| {
+            self.frame_callback = callback;
+            _ = c.wl_callback_add_listener(callback, &SurfaceState.frame_callback_listener, self);
         } else {
             std.debug.print("configure: wl_surface_frame returned null (OOM)\n", .{});
-            self.frame_callback = null;
         }
-
         c.wl_surface_commit(wl_surface);
         self.configured = true;
-        std.debug.print("configure: {}x{} grid={}x{}\n", .{ pw, ph, grid_w, grid_h });
+        std.debug.print("configure: {}x{} grid={}x{}\n", .{ extent.width, extent.height, layout.grid_w, layout.grid_h });
     }
 };
 
@@ -455,19 +452,17 @@ fn layerSurfaceConfigure(
 ) callconv(.c) void {
     const self: *SurfaceState = @ptrCast(@alignCast(data));
 
-    var pw = width;
-    var ph = height;
-    if (pw == 0) pw = self.pixel_w;
-    if (ph == 0) ph = self.pixel_h;
-    self.pixel_w = pw;
-    self.pixel_h = ph;
-
     c.zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
-
-    if (pw == 0 or ph == 0) {
+    const next_extent = dimensions.resolve(self.extent, width, height) catch |err| {
+        std.debug.print("configure: rejecting dimensions {}x{}: {}\n", .{ width, height, err });
+        return;
+    };
+    const extent = next_extent orelse {
+        self.configured = false;
         std.debug.print("configure: zero dimensions, skipping\n", .{});
         return;
-    }
+    };
+    self.extent = extent;
 
     if (self.egl_ctx) |ctx| {
         const wl_surface_egl = self.layer_surface.wl_surface orelse {
@@ -476,16 +471,16 @@ fn layerSurfaceConfigure(
         };
         var gl_context_current = false;
         if (self.egl_surface) |*existing| {
-            existing.resize(pw, ph);
+            existing.resize(extent);
             if (existing.makeCurrent(ctx)) {
                 gl_context_current = true;
-                c.glViewport(0, 0, @intCast(pw), @intCast(ph));
+                c.glViewport(0, 0, extent.c_width, extent.c_height);
             } else {
                 std.debug.print("configure: makeCurrent failed during resize, viewport not updated\n", .{});
             }
             self.needs_static_uniforms = true;
         } else {
-            self.egl_surface = EglSurface.create(ctx, wl_surface_egl, pw, ph) catch |err| blk: {
+            self.egl_surface = EglSurface.create(ctx, wl_surface_egl, extent) catch |err| blk: {
                 std.debug.print("EglSurface.create failed: {}\n", .{err});
                 break :blk null;
             };
@@ -495,25 +490,29 @@ fn layerSurfaceConfigure(
                     if (c.eglSwapInterval(ctx.display, 0) == c.EGL_FALSE) {
                         std.debug.print("eglSwapInterval(0) failed -- vsync may remain enabled\n", .{});
                     }
-                    c.glViewport(0, 0, @intCast(pw), @intCast(ph));
+                    c.glViewport(0, 0, extent.c_width, extent.c_height);
                 }
             }
         }
 
         if (self.egl_surface != null and self.renderer_scale < 1.0 and gl_context_current) {
-            const rw = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(pw)) * self.renderer_scale)));
-            const rh = @max(1, @as(u32, @intFromFloat(@as(f32, @floatFromInt(ph)) * self.renderer_scale)));
-            if (self.offscreen) |*ofs| {
-                if (!ofs.resize(rw, rh)) {
-                    std.debug.print("configure: FBO incomplete after resize, disabling offscreen\n", .{});
-                    ofs.deinit();
-                    self.offscreen = null;
+            const render_extent: ?Extent = extent.scaled(self.renderer_scale) catch |err| blk: {
+                std.debug.print("configure: invalid scaled extent: {}, rendering at full resolution\n", .{err});
+                break :blk null;
+            };
+            if (render_extent) |scaled_extent| {
+                if (self.offscreen) |*ofs| {
+                    if (!ofs.resize(scaled_extent)) {
+                        std.debug.print("configure: FBO incomplete after resize, disabling offscreen\n", .{});
+                        ofs.deinit();
+                        self.offscreen = null;
+                    }
+                } else {
+                    self.offscreen = Offscreen.init(scaled_extent, self.upscale_filter) catch |err| blk: {
+                        std.debug.print("Offscreen.init failed: {}, rendering at full resolution\n", .{err});
+                        break :blk null;
+                    };
                 }
-            } else {
-                self.offscreen = Offscreen.init(rw, rh, self.upscale_filter) catch |err| blk: {
-                    std.debug.print("Offscreen.init failed: {}, rendering at full resolution\n", .{err});
-                    break :blk null;
-                };
             }
         } else if (gl_context_current) {
             if (self.offscreen) |*ofs| {
@@ -545,7 +544,7 @@ fn layerSurfaceConfigure(
                 }
             }
             self.configured = true;
-            std.debug.print("configure (EGL): {}x{}\n", .{ pw, ph });
+            std.debug.print("configure (EGL): {}x{}\n", .{ extent.width, extent.height });
             return;
         }
 
@@ -553,7 +552,10 @@ fn layerSurfaceConfigure(
         self.egl_ctx = null;
     }
 
-    self.configureShmFallback(pw, ph);
+    self.configureShmFallback(extent) catch |err| {
+        std.debug.print("configure: configureShmFallback failed: {}\n", .{err});
+        self.configured = false;
+    };
 }
 
 /// Frame callback handler. Clears the pending flag and advances the
