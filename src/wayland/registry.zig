@@ -3,6 +3,69 @@ const c = @import("../wl.zig").c;
 const OutputInfo = @import("output.zig").OutputInfo;
 const output_mod = @import("output.zig");
 
+pub const OutputRegistrationOps = struct {
+    context: ?*anyopaque,
+    bind: *const fn (?*anyopaque, ?*c.wl_registry, u32, u32) ?*c.wl_output,
+    add_listener: *const fn (?*anyopaque, *c.wl_output, *OutputInfo) c_int,
+    release: *const fn (?*anyopaque, *c.wl_output) void,
+};
+
+pub fn registerOutputWithOps(
+    allocator: std.mem.Allocator,
+    outputs: *std.ArrayList(*OutputInfo),
+    registry: ?*c.wl_registry,
+    name: u32,
+    version: u32,
+    ops: OutputRegistrationOps,
+) !void {
+    const info = try allocator.create(OutputInfo);
+    errdefer allocator.destroy(info);
+
+    const proxy = ops.bind(ops.context, registry, name, @min(version, 3)) orelse
+        return error.OutputBindFailed;
+    info.* = .{
+        .wl_output = proxy,
+        .registry_name = name,
+        .name = "",
+        .width = 0,
+        .height = 0,
+        .refresh_mhz = 0,
+        .done = false,
+        .removed = false,
+        .allocator = allocator,
+    };
+    errdefer {
+        ops.release(ops.context, proxy);
+        info.wl_output = null;
+        info.deinit();
+    }
+
+    try outputs.append(allocator, info);
+    errdefer std.debug.assert(outputs.pop().? == info);
+    if (ops.add_listener(ops.context, proxy, info) != 0) {
+        return error.OutputListenerFailed;
+    }
+}
+
+fn bindOutput(_: ?*anyopaque, registry: ?*c.wl_registry, name: u32, version: u32) ?*c.wl_output {
+    return @ptrCast(c.wl_registry_bind(registry, name, &c.wl_output_interface, version));
+}
+
+fn addOutputListener(_: ?*anyopaque, out: *c.wl_output, info: *OutputInfo) c_int {
+    return c.wl_output_add_listener(out, &output_mod.output_listener, info);
+}
+
+fn releaseOutput(_: ?*anyopaque, out: *c.wl_output) void {
+    output_mod.releaseProxy(out);
+}
+
+const output_registration_ops = OutputRegistrationOps{
+    .context = null,
+    .bind = bindOutput,
+    .add_listener = addOutputListener,
+    .release = releaseOutput,
+};
+
 /// File-scope listener struct -- must outlive the wl_registry object.
 /// Defined at file scope (not inside a function) so the Wayland C library's
 /// raw pointer to this listener remains valid for the lifetime of the process.
@@ -60,37 +123,17 @@ fn registryGlobal(
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.zwlr_layer_shell_v1_interface.name, 0))) {
         self.layer_shell = @ptrCast(c.wl_registry_bind(registry, name, &c.zwlr_layer_shell_v1_interface, 4));
     } else if (std.mem.eql(u8, iface, std.mem.sliceTo(c.wl_output_interface.name, 0))) {
-        // Bind at most version 3: gives done + mode + geometry events.
-        // Version 4 adds name/description which are nice-to-have but many
-        // compositors (especially older wlroots-based ones) only support v2/v3.
-        const wl_out: ?*c.wl_output = @ptrCast(c.wl_registry_bind(registry, name, &c.wl_output_interface, @min(version, 3)));
-        if (wl_out == null) return;
-
         const outputs = self.outputs orelse return;
-        // Heap-allocate so the address (used as wl_output listener userdata)
-        // stays valid for the output's lifetime regardless of list growth.
-        const info = self.allocator.create(OutputInfo) catch {
-            std.debug.print("registry: OOM recording output {}, skipping\n", .{name});
-            return;
+        registerOutputWithOps(
+            self.allocator,
+            outputs,
+            registry,
+            name,
+            version,
+            output_registration_ops,
+        ) catch |err| {
+            std.debug.print("registry: failed to register output {}: {s}\n", .{ name, @errorName(err) });
         };
-        info.* = OutputInfo{
-            .wl_output = wl_out,
-            .registry_name = name,
-            .name = "",
-            .width = 0,
-            .height = 0,
-            .refresh_mhz = 0,
-            .done = false,
-            .removed = false,
-            .allocator = self.allocator,
-        };
-        outputs.append(self.allocator, info) catch {
-            std.debug.print("registry: OOM appending output {}, skipping\n", .{name});
-            info.deinit();
-            self.allocator.destroy(info);
-            return;
-        };
-        _ = c.wl_output_add_listener(wl_out, &output_mod.output_listener, info);
     }
 }
 

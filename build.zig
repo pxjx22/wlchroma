@@ -165,6 +165,35 @@ pub fn build(b: *std.Build) void {
         "Run Wayland/EGL lifecycle safety tests",
     );
 
+    const wayland_exports_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_wayland_exports.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    wayland_exports_mod.addImport("sys", sys_mod);
+    wayland_exports_mod.addCSourceFile(.{ .file = src, .flags = &.{} });
+    wayland_exports_mod.addCSourceFile(.{ .file = xdg_src, .flags = &.{} });
+    wayland_exports_mod.addIncludePath(hdr.dirname());
+    wayland_exports_mod.addIncludePath(xdg_hdr.dirname());
+    wayland_exports_mod.linkSystemLibrary("wayland-client", .{});
+    wayland_exports_mod.linkSystemLibrary("EGL", .{});
+    wayland_exports_mod.linkSystemLibrary("GLESv2", .{});
+    wayland_exports_mod.linkSystemLibrary("wayland-egl", .{});
+
+    const output_registration_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/output_registration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    output_registration_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const output_registration_tests = b.addTest(.{
+        .root_module = output_registration_test_mod,
+    });
+    const run_output_registration_tests = b.addRunArtifact(output_registration_tests);
+    phase2_test_step.dependOn(&run_output_registration_tests.step);
+    test_step.dependOn(&run_output_registration_tests.step);
+
     const dimensions_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/dimensions_test.zig"),
         .target = target,

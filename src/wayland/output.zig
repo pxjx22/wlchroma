@@ -1,6 +1,17 @@
 const std = @import("std");
 const c = @import("../wl.zig").c;
 
+pub fn releaseProxy(out: *c.wl_output) void {
+    // wl_output.release exists from version 3; the registry binds
+    // @min(advertised, 3), so fall back to destroying the proxy
+    // client-side on v1/v2 compositors.
+    if (c.wl_output_get_version(out) >= 3) {
+        c.wl_output_release(out);
+    } else {
+        c.wl_output_destroy(out);
+    }
+}
+
 pub const OutputInfo = struct {
     wl_output: ?*c.wl_output,
     /// wl_registry.global name announcing this output. The only identifier
@@ -21,14 +32,7 @@ pub const OutputInfo = struct {
 
     pub fn deinit(self: *OutputInfo) void {
         if (self.wl_output) |out| {
-            // wl_output.release exists from version 3; the registry binds
-            // @min(advertised, 3), so fall back to destroying the proxy
-            // client-side on v1/v2 compositors.
-            if (c.wl_output_get_version(out) >= 3) {
-                c.wl_output_release(out);
-            } else {
-                c.wl_output_destroy(out);
-            }
+            releaseProxy(out);
             self.wl_output = null;
         }
         if (self.name.len > 0) {
