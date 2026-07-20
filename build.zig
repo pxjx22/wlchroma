@@ -159,6 +159,25 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     src_exports_mod.addImport("sys", sys_mod);
+
+    const phase2_test_step = b.step(
+        "test-wayland-egl",
+        "Run Wayland/EGL lifecycle safety tests",
+    );
+
+    const dimensions_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/dimensions_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dimensions_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const dimensions_tests = b.addTest(.{
+        .root_module = dimensions_test_mod,
+    });
+    const run_dimensions_tests = b.addRunArtifact(dimensions_tests);
+    phase2_test_step.dependOn(&run_dimensions_tests.step);
+    test_step.dependOn(&run_dimensions_tests.step);
+
     const effect_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/effect_mutation_test.zig"),
         .target = target,

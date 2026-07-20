@@ -6,3 +6,4 @@ pub const effect = @import("render/effect.zig");
 pub const config = @import("config/config.zig");
 pub const defaults = @import("config/defaults.zig");
 pub const color_fade = @import("render/color_fade.zig");
+pub const dimensions = @import("wayland/dimensions.zig");
