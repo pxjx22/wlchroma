@@ -220,6 +220,17 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_gpu_epoch_tests.step);
     test_step.dependOn(&run_gpu_epoch_tests.step);
 
+    const surface_detach_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/surface_detach_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    surface_detach_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const surface_detach_tests = b.addTest(.{ .root_module = surface_detach_test_mod });
+    const run_surface_detach_tests = b.addRunArtifact(surface_detach_tests);
+    phase2_test_step.dependOn(&run_surface_detach_tests.step);
+    test_step.dependOn(&run_surface_detach_tests.step);
+
     const effect_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/effect_mutation_test.zig"),
         .target = target,

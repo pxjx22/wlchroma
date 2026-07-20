@@ -15,6 +15,7 @@ const Event = union(enum) {
 const FakeOps = struct {
     successes: [4]bool = .{ false, false, false, false },
     count: usize,
+    detached: [4]bool = @splat(false),
     app_wrapper_present: bool = true,
     surface_wrapper_present: [4]bool = @splat(true),
     context_destroy_saw_app_wrapper: bool = false,
@@ -29,6 +30,7 @@ const FakeOps = struct {
 
     pub fn detachAll(self: *FakeOps) void {
         self.record(.detach_all);
+        for (0..self.count) |index| self.detached[index] = true;
     }
     pub fn candidateCount(self: *FakeOps) usize {
         return self.count;
@@ -185,6 +187,32 @@ test "close clears current before destroying any EGL surface" {
 test "close destroys context before clearing CPU handle wrappers" {
     var ops = FakeOps{ .successes = .{ true, false, false, false }, .count = 1 };
     gpu_epoch.close(FakeOps, &ops);
+    try std.testing.expect(firstTag(&ops, .destroy_context).? < firstTag(&ops, .clear_handles).?);
+}
+
+test "every candidate detaches before context destruction" {
+    var ops = FakeOps{ .successes = .{ true, false, false, false }, .count = 3 };
+    gpu_epoch.close(FakeOps, &ops);
+    try std.testing.expect(ops.detached[0]);
+    try std.testing.expect(ops.detached[1]);
+    try std.testing.expect(ops.detached[2]);
+    try std.testing.expectEqual(.detach_all, eventTag(ops.events[0]));
+    try std.testing.expect(firstTag(&ops, .destroy_context).? > 0);
+}
+
+test "shutdown continues after the first makeCurrent failure" {
+    var ops = FakeOps{ .successes = .{ false, true, false, false }, .count = 3 };
+    gpu_epoch.close(FakeOps, &ops);
+    try std.testing.expectEqual(@as(usize, 0), ops.events[1].try_current);
+    try std.testing.expectEqual(@as(usize, 1), ops.events[2].try_current);
+    try std.testing.expect(firstTag(&ops, .delete_app_gl) != null);
+}
+
+test "all acquisition failures rely on context destruction without GL calls" {
+    var ops = FakeOps{ .count = 3 };
+    gpu_epoch.close(FakeOps, &ops);
+    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_app_gl));
+    try std.testing.expectEqual(@as(?usize, null), firstTag(&ops, .delete_surface_gl));
     try std.testing.expect(firstTag(&ops, .destroy_context).? < firstTag(&ops, .clear_handles).?);
 }
 

@@ -9,6 +9,7 @@ const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const Effect = @import("render/effect.zig").Effect;
 const EglContext = @import("render/egl_context.zig").EglContext;
+const gpu_epoch = @import("render/gpu_epoch.zig");
 const shader_mod = @import("render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const EffectShader = @import("render/effect_shader.zig").EffectShader;
@@ -39,6 +40,7 @@ pub const App = struct {
     /// listener userdata stay valid regardless of list growth or removal.
     outputs: std.ArrayList(*OutputInfo),
     surfaces: std.ArrayList(*SurfaceState),
+    detached_gpu: std.ArrayList(SurfaceState.DetachedGpu),
     effect: Effect,
     egl_ctx: ?EglContext,
     effect_shader: ?EffectShader,
@@ -111,6 +113,7 @@ pub const App = struct {
             .registry = Registry{},
             .outputs = .empty,
             .surfaces = .empty,
+            .detached_gpu = .empty,
             .effect = effect,
             .egl_ctx = null,
             .effect_shader = null,
@@ -204,6 +207,17 @@ pub const App = struct {
             if (!out.done or out.removed) continue;
             if (self.surfaceForOutput(out) != null) continue;
 
+            self.surfaces.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                std.debug.print("surface list reserve failed for output {}: {}\n", .{ out.registry_name, err });
+                continue;
+            };
+            self.detached_gpu.ensureTotalCapacity(
+                self.allocator,
+                self.surfaces.items.len + 1,
+            ) catch |err| {
+                std.debug.print("surface GPU cleanup reserve failed for output {}: {}\n", .{ out.registry_name, err });
+                continue;
+            };
             const surface_state = SurfaceState.create(
                 self.allocator,
                 self.registry.compositor.?,
@@ -220,12 +234,7 @@ pub const App = struct {
                 std.debug.print("surface create failed for output {}: {} — skipping this output\n", .{ out.registry_name, err });
                 continue;
             };
-            self.surfaces.append(self.allocator, surface_state) catch |err| {
-                std.debug.print("surface list append failed for output {}: {} — skipping this output\n", .{ out.registry_name, err });
-                surface_state.deinit(self.display);
-                self.allocator.destroy(surface_state);
-                continue;
-            };
+            self.surfaces.appendAssumeCapacity(surface_state);
             std.debug.print("surface created for output {} ({}x{}{s}{s})\n", .{
                 out.registry_name,
                 out.width,
@@ -290,9 +299,11 @@ pub const App = struct {
             // create/close forever. If the output genuinely persists, the
             // compositor re-announces it as a new global.
             s.output.removed = true;
-            s.deinit(self.display);
-            self.allocator.destroy(s);
             _ = self.surfaces.swapRemove(i);
+            self.retireSurfaceGpu(s);
+            std.debug.assert(self.detached_gpu.items.len == 0);
+            s.deinit();
+            self.allocator.destroy(s);
         }
 
         i = 0;
@@ -305,6 +316,138 @@ pub const App = struct {
             out.deinit();
             self.allocator.destroy(out);
             _ = self.outputs.swapRemove(i);
+        }
+    }
+
+    fn retireSurfaceGpu(self: *App, surface: *SurfaceState) void {
+        const detached_index = self.detached_gpu.items.len;
+        self.detached_gpu.appendAssumeCapacity(surface.detachGpu());
+        const detached = &self.detached_gpu.items[detached_index];
+
+        if (self.surfaces.items.len == 0) {
+            self.closeGpuEpoch();
+            return;
+        }
+
+        if (self.egl_ctx) |*ctx| {
+            var current = false;
+            if (detached.egl_surface) |*egl_surface| current = egl_surface.makeCurrent(ctx);
+            if (!current) {
+                for (self.surfaces.items) |survivor| {
+                    if (survivor.egl_surface) |*egl_surface| {
+                        if (egl_surface.makeCurrent(ctx)) {
+                            current = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (current) {
+                if (detached.offscreen) |*offscreen| offscreen.deinit();
+                detached.offscreen = null;
+                ctx.clearCurrent();
+                if (detached.egl_surface) |*egl_surface| egl_surface.deinit();
+                detached.egl_surface = null;
+                _ = self.detached_gpu.pop();
+                return;
+            }
+
+            if (detached.offscreen != null) {
+                self.gpu_pipeline_failed = true;
+                self.closeGpuEpoch();
+                for (self.surfaces.items) |survivor| survivor.configureCpuFallbackAfterDetach();
+                return;
+            }
+        }
+
+        std.debug.assert(detached.offscreen == null);
+        if (detached.egl_surface) |*egl_surface| egl_surface.deinit();
+        detached.egl_surface = null;
+        _ = self.detached_gpu.pop();
+    }
+
+    const GpuEpochOps = struct {
+        app: *App,
+        ctx: *EglContext,
+
+        pub fn detachAll(self: *GpuEpochOps) void {
+            for (self.app.surfaces.items) |surface| {
+                self.app.detached_gpu.appendAssumeCapacity(surface.detachGpu());
+            }
+        }
+
+        pub fn candidateCount(self: *GpuEpochOps) usize {
+            return self.app.detached_gpu.items.len;
+        }
+
+        pub fn tryMakeCurrent(self: *GpuEpochOps, index: usize) bool {
+            const egl_surface = if (self.app.detached_gpu.items[index].egl_surface) |*value| value else return false;
+            return egl_surface.makeCurrent(self.ctx);
+        }
+
+        pub fn deleteAppGl(self: *GpuEpochOps) void {
+            if (self.app.blit_shader) |*shader| shader.deinit();
+            self.app.blit_shader = null;
+            if (self.app.effect_shader) |*shader| shader.deinit();
+            self.app.effect_shader = null;
+        }
+
+        pub fn deleteSurfaceGl(self: *GpuEpochOps, index: usize) void {
+            const detached = &self.app.detached_gpu.items[index];
+            if (detached.offscreen) |*offscreen| offscreen.deinit();
+            detached.offscreen = null;
+        }
+
+        pub fn clearCurrent(self: *GpuEpochOps) void {
+            self.ctx.clearCurrent();
+        }
+
+        pub fn destroySurface(self: *GpuEpochOps, index: usize) void {
+            const detached = &self.app.detached_gpu.items[index];
+            if (detached.egl_surface) |*egl_surface| egl_surface.deinit();
+            detached.egl_surface = null;
+        }
+
+        pub fn destroyContext(self: *GpuEpochOps) void {
+            self.ctx.destroy();
+            self.app.egl_ctx = null;
+        }
+
+        pub fn clearHandles(self: *GpuEpochOps) void {
+            self.app.blit_shader = null;
+            self.app.effect_shader = null;
+            for (self.app.detached_gpu.items) |*detached| {
+                std.debug.assert(detached.egl_surface == null);
+                detached.offscreen = null;
+            }
+            self.app.detached_gpu.clearRetainingCapacity();
+            for (self.app.surfaces.items) |surface| {
+                std.debug.assert(surface.egl_ctx == null);
+                std.debug.assert(surface.egl_surface == null);
+                std.debug.assert(surface.offscreen == null);
+            }
+        }
+    };
+
+    fn closeGpuEpoch(self: *App) void {
+        const ctx = if (self.egl_ctx) |*value| value else {
+            std.debug.assert(self.detached_gpu.items.len == 0);
+            std.debug.assert(self.effect_shader == null);
+            std.debug.assert(self.blit_shader == null);
+            for (self.surfaces.items) |surface| {
+                std.debug.assert(surface.egl_ctx == null);
+                std.debug.assert(surface.egl_surface == null);
+                std.debug.assert(surface.offscreen == null);
+            }
+            return;
+        };
+        var ops = GpuEpochOps{ .app = self, .ctx = ctx };
+        gpu_epoch.close(GpuEpochOps, &ops);
+        for (self.surfaces.items) |surface| {
+            std.debug.assert(surface.egl_ctx == null);
+            std.debug.assert(surface.egl_surface == null);
+            std.debug.assert(surface.offscreen == null);
         }
     }
 
@@ -875,14 +1018,10 @@ pub const App = struct {
 
     fn forceCpuFallbackForGpuOnly(self: *App) void {
         if (!self.effect.isGpuOnly()) return;
-        self.effect_shader = null;
-        if (self.blit_shader) |*bs| bs.deinit();
-        self.blit_shader = null;
-        for (self.surfaces.items) |s| {
-            s.forceCpuFallback();
+        self.closeGpuEpoch();
+        for (self.surfaces.items) |surface| {
+            surface.configureCpuFallbackAfterDetach();
         }
-        if (self.egl_ctx) |*ctx| ctx.deinit();
-        self.egl_ctx = null;
     }
 
     fn dispatchCommand(
@@ -1136,43 +1275,20 @@ pub const App = struct {
         sys.close(self.tfd);
         sys.close(self.sig_fd);
 
-        // Make EGL context current so GL object deletion works.
-        if (self.egl_ctx) |*ctx| {
-            var made_current = false;
-            for (self.surfaces.items) |s| {
-                if (s.dead) continue;
-                if (s.egl_surface) |*egl_surf| {
-                    made_current = egl_surf.makeCurrent(ctx);
-                    if (!made_current) {
-                        std.debug.print("deinit: eglMakeCurrent failed, GL cleanup may be incomplete\n", .{});
-                    }
-                    break;
-                }
-            }
-        }
-        if (self.blit_shader) |*bs| bs.deinit();
-        self.blit_shader = null;
-        if (self.effect_shader) |*sh| sh.deinit();
-        self.effect_shader = null;
-
-        // Unbind EGL context from the surface before destroying EGLSurfaces.
-        if (self.egl_ctx) |*ctx| {
-            _ = c.eglMakeCurrent(ctx.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
-        }
+        self.closeGpuEpoch();
 
         for (self.surfaces.items) |s| {
-            s.deinit(self.display);
+            s.deinit();
             self.allocator.destroy(s);
         }
         self.surfaces.deinit(self.allocator);
+        self.detached_gpu.deinit(self.allocator);
 
         for (self.outputs.items) |out| {
             out.deinit();
             self.allocator.destroy(out);
         }
         self.outputs.deinit(self.allocator);
-
-        if (self.egl_ctx) |*ctx| ctx.deinit();
 
         self.registry.deinit();
         c.wl_display_disconnect(self.display);

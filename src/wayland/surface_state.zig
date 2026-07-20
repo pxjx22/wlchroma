@@ -57,6 +57,13 @@ pub const SurfaceState = struct {
     upscale_filter: UpscaleFilter,
     /// Set true when the layer surface is closed by the compositor.
     dead: bool,
+    /// Set once non-GPU Wayland and SHM ownership has been released.
+    torn_down: bool,
+
+    pub const DetachedGpu = struct {
+        egl_surface: ?EglSurface,
+        offscreen: ?Offscreen,
+    };
 
     const layer_surface_listener = c.zwlr_layer_surface_v1_listener{
         .configure = layerSurfaceConfigure,
@@ -120,6 +127,7 @@ pub const SurfaceState = struct {
             .renderer_scale = renderer_scale,
             .upscale_filter = upscale_filter,
             .dead = false,
+            .torn_down = false,
         };
 
         _ = c.zwlr_layer_surface_v1_add_listener(
@@ -232,43 +240,42 @@ pub const SurfaceState = struct {
         return @truncate(ms);
     }
 
-    pub fn deinit(self: *SurfaceState, display: *c.wl_display) void {
-        _ = display;
-        if (self.dead) return;
-        self.teardown();
+    pub fn detachGpu(self: *SurfaceState) DetachedGpu {
+        const detached = DetachedGpu{
+            .egl_surface = self.egl_surface,
+            .offscreen = self.offscreen,
+        };
+        self.egl_ctx = null;
+        self.egl_surface = null;
+        self.offscreen = null;
+        return detached;
     }
 
-    fn teardown(self: *SurfaceState) void {
+    pub fn configureCpuFallbackAfterDetach(self: *SurfaceState) void {
+        std.debug.assert(self.egl_ctx == null);
+        std.debug.assert(self.egl_surface == null);
+        std.debug.assert(self.offscreen == null);
+        if (self.dead) return;
+        const extent = self.extent orelse {
+            self.configured = false;
+            return;
+        };
+        self.configureShmFallback(extent) catch |err| {
+            std.debug.print("failed to configure CPU fallback: {}\n", .{err});
+            self.configured = false;
+        };
+    }
+
+    fn teardownWayland(self: *SurfaceState) void {
+        if (self.torn_down) return;
+        self.torn_down = true;
+        std.debug.assert(self.egl_ctx == null);
+        std.debug.assert(self.egl_surface == null);
+        std.debug.assert(self.offscreen == null);
+
         if (self.frame_callback) |cb| {
             c.wl_callback_destroy(cb);
             self.frame_callback = null;
-        }
-        if (self.offscreen) |*ofs| {
-            var gl_ok = false;
-            if (self.egl_surface) |*egl_surf| {
-                if (self.egl_ctx) |ctx| {
-                    gl_ok = egl_surf.makeCurrent(ctx);
-                }
-            }
-            if (gl_ok) {
-                ofs.deinit();
-            } else {
-                std.debug.print("teardown: skipping GL cleanup (no current context), offscreen FBO leaked\n", .{});
-            }
-            self.offscreen = null;
-        }
-        if (self.egl_surface) |*egl_surf| {
-            // If this surface is the thread's current draw surface, unbind
-            // before destroying it: a stale current binding could make
-            // makeCurrent's handle-equality fast path false-match a future
-            // surface if the driver reuses the handle.
-            if (self.egl_ctx) |ctx| {
-                if (c.eglGetCurrentSurface(c.EGL_DRAW) == egl_surf.egl_surface) {
-                    _ = c.eglMakeCurrent(ctx.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
-                }
-            }
-            egl_surf.deinit();
-            self.egl_surface = null;
         }
         if (self.configured) {
             if (self.layer_surface.wl_surface) |ws| {
@@ -287,6 +294,10 @@ pub const SurfaceState = struct {
         }
         self.configured = false;
         self.shm_effect = null;
+    }
+
+    pub fn deinit(self: *SurfaceState) void {
+        self.teardownWayland();
     }
 
     /// Apply the current renderer_scale immediately: create or resize the
@@ -340,31 +351,6 @@ pub const SurfaceState = struct {
         // (reclaimed when the context is destroyed).
         if (gl_ok) ofs.deinit();
         self.offscreen = null;
-    }
-
-    pub fn forceCpuFallback(self: *SurfaceState) void {
-        if (self.dead) return;
-        const extent = self.extent orelse return;
-
-        if (self.offscreen) |*ofs| {
-            var gl_ok = false;
-            if (self.egl_surface) |*egl_surf| {
-                if (self.egl_ctx) |ctx| {
-                    gl_ok = egl_surf.makeCurrent(ctx);
-                }
-            }
-            if (gl_ok) ofs.deinit();
-            self.offscreen = null;
-        }
-        if (self.egl_surface) |*egl_surf| {
-            egl_surf.deinit();
-            self.egl_surface = null;
-        }
-        self.egl_ctx = null;
-        self.configureShmFallback(extent) catch |err| {
-            std.debug.print("force CPU fallback: configureShmFallback failed: {}\n", .{err});
-            self.configured = false;
-        };
     }
 
     fn cpuEffect(self: *SurfaceState) *Effect {
@@ -584,8 +570,7 @@ fn layerSurfaceClosed(
 ) callconv(.c) void {
     _ = layer_surface;
     const self: *SurfaceState = @ptrCast(@alignCast(data));
-    std.debug.print("layer surface closed, tearing down surface\n", .{});
-    self.teardown();
+    std.debug.print("layer surface closed, scheduling surface teardown\n", .{});
     self.dead = true;
 }
 
