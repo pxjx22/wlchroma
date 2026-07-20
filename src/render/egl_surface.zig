@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("../wl.zig").c;
 const EglContext = @import("egl_context.zig").EglContext;
+const gpu_epoch = @import("gpu_epoch.zig");
 const Extent = @import("../wayland/dimensions.zig").Extent;
 
 comptime {
@@ -54,10 +55,21 @@ pub const EglSurface = struct {
     /// already bound (common case: single output, consecutive frames).
     /// For multi-output setups, context switching still happens when
     /// iterating to a different surface -- this is required and correct.
+    pub fn isCurrent(self: *const EglSurface, ctx: *const EglContext) bool {
+        return gpu_epoch.handlesMatch(
+            c.eglGetCurrentSurface(c.EGL_DRAW),
+            self.egl_surface,
+            c.eglGetCurrentContext(),
+            ctx.context,
+        );
+    }
+
     pub fn makeCurrent(self: *EglSurface, ctx: *const EglContext) bool {
-        // eglGetCurrentSurface is a cheap thread-local query, no kernel crossing.
-        if (c.eglGetCurrentSurface(c.EGL_DRAW) == self.egl_surface) return true;
-        return c.eglMakeCurrent(ctx.display, self.egl_surface, self.egl_surface, ctx.context) == c.EGL_TRUE;
+        if (self.isCurrent(ctx)) return true;
+        if (c.eglMakeCurrent(ctx.display, self.egl_surface, self.egl_surface, ctx.context) != c.EGL_TRUE) {
+            return false;
+        }
+        return self.isCurrent(ctx);
     }
 
     /// Present the rendered frame to the compositor.
@@ -66,6 +78,14 @@ pub const EglSurface = struct {
     }
 
     pub fn deinit(self: *EglSurface) void {
+        if (c.eglGetCurrentSurface(c.EGL_DRAW) == self.egl_surface) {
+            _ = c.eglMakeCurrent(
+                self.egl_display,
+                c.EGL_NO_SURFACE,
+                c.EGL_NO_SURFACE,
+                c.EGL_NO_CONTEXT,
+            );
+        }
         _ = c.eglDestroySurface(self.egl_display, self.egl_surface);
         c.wl_egl_window_destroy(self.egl_window);
     }

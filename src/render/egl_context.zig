@@ -59,8 +59,11 @@ pub const EglContext = struct {
         };
     }
 
-    pub fn deinit(self: *EglContext) void {
+    pub fn clearCurrent(self: *const EglContext) void {
         _ = c.eglMakeCurrent(self.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
+    }
+
+    pub fn destroy(self: *EglContext) void {
         _ = c.eglDestroyContext(self.display, self.context);
         _ = c.eglTerminate(self.display);
         // Release per-thread EGL state (TLS, error codes). Safe to call even
@@ -68,5 +71,10 @@ pub const EglContext = struct {
         _ = c.eglReleaseThread();
         self.display = c.EGL_NO_DISPLAY;
         self.context = c.EGL_NO_CONTEXT;
+    }
+
+    pub fn deinit(self: *EglContext) void {
+        self.clearCurrent();
+        self.destroy();
     }
 };
