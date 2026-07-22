@@ -173,6 +173,36 @@ pub fn build(b: *std.Build) void {
     src_exports_mod.addImport("sys", sys_mod);
     src_exports_mod.addOptions("build_options", daemon_options);
 
+    const cpu_bench_sys_mod = b.createModule(.{
+        .root_source_file = b.path("src/sys.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const cpu_bench_src_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_exports.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    cpu_bench_src_mod.addImport("sys", cpu_bench_sys_mod);
+    cpu_bench_src_mod.addOptions("build_options", daemon_options);
+    const cpu_bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/cpu_path.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    cpu_bench_mod.addImport("wlchroma_src", cpu_bench_src_mod);
+    cpu_bench_mod.addImport("sys", cpu_bench_sys_mod);
+    const cpu_bench_exe = b.addExecutable(.{
+        .name = "wlchroma-cpu-bench",
+        .root_module = cpu_bench_mod,
+    });
+    const run_cpu_bench = b.addRunArtifact(cpu_bench_exe);
+    const cpu_bench_step = b.step(
+        "bench-cpu",
+        "Benchmark ReleaseFast colormix and SHM expansion",
+    );
+    cpu_bench_step.dependOn(&run_cpu_bench.step);
+
     const phase2_test_step = b.step(
         "test-wayland-egl",
         "Run Wayland/EGL lifecycle safety tests",
