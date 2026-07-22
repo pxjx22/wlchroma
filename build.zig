@@ -220,6 +220,19 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_gpu_epoch_tests.step);
     test_step.dependOn(&run_gpu_epoch_tests.step);
 
+    const gpu_upload_state_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/gpu_upload_state_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gpu_upload_state_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const gpu_upload_state_tests = b.addTest(.{
+        .root_module = gpu_upload_state_test_mod,
+    });
+    const run_gpu_upload_state_tests = b.addRunArtifact(gpu_upload_state_tests);
+    phase2_test_step.dependOn(&run_gpu_upload_state_tests.step);
+    test_step.dependOn(&run_gpu_upload_state_tests.step);
+
     const surface_detach_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/surface_detach_test.zig"),
         .target = target,
