@@ -67,3 +67,20 @@ test "retiring CPU-only last surface clears App cleanup scratch" {
     try std.testing.expect(state.egl_surface == null);
     try std.testing.expect(state.offscreen == null);
 }
+
+test "program global upload state is app owned" {
+    try std.testing.expect(@hasField(App, "gpu_upload_state"));
+    try std.testing.expect(!@hasField(SurfaceState, "needs_static_uniforms"));
+}
+
+test "render tick receives mutable shader and app upload state" {
+    const info = @typeInfo(@TypeOf(SurfaceState.renderTick)).@"fn";
+    try std.testing.expectEqual(@as(usize, 4), info.params.len);
+    try std.testing.expect(
+        info.params[1].type.? == ?*wayland.effect_shader.EffectShader,
+    );
+    try std.testing.expect(
+        info.params[2].type.? ==
+            *wayland.gpu_upload_state.GpuUploadState,
+    );
+}

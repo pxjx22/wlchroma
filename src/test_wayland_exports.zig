@@ -4,6 +4,7 @@ pub const surface_state = @import("wayland/surface_state.zig");
 pub const app = @import("app.zig");
 pub const dimensions = @import("wayland/dimensions.zig");
 pub const egl_context = @import("render/egl_context.zig");
+pub const gpu_upload_state = @import("render/gpu_upload_state.zig");
 pub const effect_shader = @import("render/effect_shader.zig");
 pub const colormix_shader = @import("render/colormix_shader.zig");
 pub const glass_drift_shader = @import("render/glass_drift_shader.zig");

@@ -4,6 +4,7 @@ const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
 const Effect = @import("../render/effect.zig").Effect;
 const EffectShader = @import("../render/effect_shader.zig").EffectShader;
+const GpuUploadState = @import("../render/gpu_upload_state.zig").GpuUploadState;
 const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
 const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
@@ -18,6 +19,27 @@ const UpscaleFilter = @import("../config/config.zig").UpscaleFilter;
 const dimensions = @import("dimensions.zig");
 const Extent = dimensions.Extent;
 const ShmLayout = dimensions.ShmLayout;
+
+const EffectUploadOps = struct {
+    shader: *EffectShader,
+    effect: *const Effect,
+
+    pub fn useProgram(self: *EffectUploadOps) void {
+        self.shader.useProgram();
+    }
+
+    pub fn bindGeometry(self: *EffectUploadOps) void {
+        self.shader.bindGeometry();
+    }
+
+    pub fn uploadPalette(self: *EffectUploadOps) void {
+        self.shader.uploadPalette(self.effect);
+    }
+
+    pub fn uploadStatic(self: *EffectUploadOps) void {
+        self.shader.uploadStatic(self.effect);
+    }
+};
 
 /// Context passed as userdata to each wl_buffer release listener.
 pub const BufReleaseCtx = struct {
@@ -45,9 +67,6 @@ pub const SurfaceState = struct {
     running: *bool,
     egl_surface: ?EglSurface,
     egl_ctx: ?*const EglContext,
-    /// Set true on configure/resize so the next renderTick uploads static
-    /// uniforms (e.g. cos_mod/sin_mod for colormix, phase for glass_drift).
-    needs_static_uniforms: bool,
     /// Per-buffer release context, stored here so the release handler
     /// can reach both the ShmPool busy flag and the SurfaceState.
     buf_ctx: [2]BufReleaseCtx,
@@ -122,7 +141,6 @@ pub const SurfaceState = struct {
             .running = running,
             .egl_surface = null,
             .egl_ctx = egl_ctx,
-            .needs_static_uniforms = true,
             .buf_ctx = undefined,
             .offscreen = null,
             .renderer_scale = renderer_scale,
@@ -141,7 +159,12 @@ pub const SurfaceState = struct {
     }
 
     /// Called by the timerfd tick in the main loop (~15fps).
-    pub fn renderTick(self: *SurfaceState, shader: ?*const EffectShader, blit_shader: ?*const BlitShader) void {
+    pub fn renderTick(
+        self: *SurfaceState,
+        shader: ?*EffectShader,
+        upload_state: *GpuUploadState,
+        blit_shader: ?*const BlitShader,
+    ) void {
         if (self.dead) return;
         if (!self.configured) return;
         const extent = self.extent orelse return;
@@ -156,10 +179,11 @@ pub const SurfaceState = struct {
             if (!egl_surf.makeCurrent(ctx)) return;
 
             if (shader) |sh| {
-                if (self.needs_static_uniforms) {
-                    sh.uploadStatic(self.effect);
-                    self.needs_static_uniforms = false;
-                }
+                var upload_ops = EffectUploadOps{
+                    .shader = sh,
+                    .effect = self.effect,
+                };
+                upload_state.flushIfCurrent(EffectUploadOps, &upload_ops, true);
 
                 if (self.offscreen) |*ofs| {
                     if (blit_shader) |bs| {
@@ -481,7 +505,6 @@ fn layerSurfaceConfigure(
             } else {
                 std.debug.print("configure: makeCurrent failed during resize, viewport not updated\n", .{});
             }
-            self.needs_static_uniforms = true;
         } else {
             self.egl_surface = EglSurface.create(ctx, wl_surface_egl, extent) catch |err| blk: {
                 std.debug.print("EglSurface.create failed: {}\n", .{err});

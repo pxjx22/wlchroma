@@ -13,6 +13,7 @@ const gpu_epoch = @import("render/gpu_epoch.zig");
 const shader_mod = @import("render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const EffectShader = @import("render/effect_shader.zig").EffectShader;
+const GpuUploadState = @import("render/gpu_upload_state.zig").GpuUploadState;
 const color_fade = @import("render/color_fade.zig");
 const defaults = @import("config/defaults.zig");
 const config_mod = @import("config/config.zig");
@@ -50,6 +51,7 @@ pub const App = struct {
     effect: Effect,
     egl_ctx: ?EglContext,
     effect_shader: ?EffectShader,
+    gpu_upload_state: GpuUploadState,
     blit_shader: ?BlitShader,
     /// Set when GPU pipeline init failed permanently (shader compile/link or
     /// no surface could be made current); prevents retrying every tick.
@@ -123,6 +125,7 @@ pub const App = struct {
             .effect = effect,
             .egl_ctx = null,
             .effect_shader = null,
+            .gpu_upload_state = .{},
             .blit_shader = null,
             .gpu_pipeline_failed = false,
             .timer_armed = false,
@@ -386,6 +389,7 @@ pub const App = struct {
             self.app.blit_shader = null;
             if (self.app.effect_shader) |*shader| shader.deinit();
             self.app.effect_shader = null;
+            self.app.gpu_upload_state.clear();
         }
 
         pub fn deleteSurfaceGl(self: *GpuEpochOps, index: usize) void {
@@ -412,6 +416,7 @@ pub const App = struct {
         pub fn clearHandles(self: *GpuEpochOps) void {
             self.app.blit_shader = null;
             self.app.effect_shader = null;
+            self.app.gpu_upload_state.clear();
             for (self.app.detached_gpu.items) |*detached| {
                 std.debug.assert(detached.egl_surface == null);
                 detached.offscreen = null;
@@ -563,20 +568,12 @@ pub const App = struct {
                     if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
                     return;
                 }
+                self.gpu_upload_state = GpuUploadState.newGeneration();
                 if (perf_logs_enabled) {
                     const shader_init_end_ns: u64 = sys.monotonicNs();
                     const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
                     std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
                 }
-                // Initialize the effect program, geometry, and palette while
-                // this surface's EGL context is current. Static uniforms are
-                // uploaded by SurfaceState's existing first-render branch.
-                if (self.effect_shader) |*sh| {
-                    sh.useProgram();
-                    sh.bindGeometry();
-                    sh.uploadPalette(&self.effect);
-                }
-
                 // Initialize blit shader for offscreen upscale pass.
                 if (self.renderer_scale < 1.0) {
                     self.ensureBlitShader();
@@ -616,6 +613,7 @@ pub const App = struct {
                 if (self.acquireGpuCurrent(ctx)) {
                     self.effect_shader.?.deinit();
                     self.effect_shader = null;
+                    self.gpu_upload_state.clear();
                 } else {
                     std.debug.print("effect switch: no EGL surface could be made current; closing GPU epoch\n", .{});
                     self.gpu_pipeline_failed = true;
@@ -661,10 +659,16 @@ pub const App = struct {
         // bind() leaves the blit program/VBO as current GL state; restore the
         // effect program and geometry so per-frame uploads and draws hit the
         // right pipeline without redundantly uploading program-global data.
-        if (self.effect_shader) |*sh| {
-            sh.useProgram();
-            sh.bindGeometry();
+        if (self.effect_shader) |*effect_shader| {
+            if (!self.gpu_upload_state.dirty.program_binding) {
+                effect_shader.useProgram();
+                effect_shader.bindGeometry();
+            }
         }
+    }
+
+    fn markGpuPaletteDirty(self: *App) void {
+        self.gpu_upload_state.markPaletteDirty(self.effect_shader != null);
     }
 
     pub fn run(self: *App) !void {
@@ -772,19 +776,15 @@ pub const App = struct {
                 if (self.fade) |f| {
                     const s = color_fade.sample(f, sys.monotonicNs());
                     self.effect.updatePalette(s.colors);
-                    if (self.effect_shader) |*sh| {
-                        sh.useProgram();
-                        sh.bindGeometry();
-                        sh.uploadPalette(&self.effect);
-                    }
+                    self.markGpuPaletteDirty();
                     self.current_palette = s.colors;
                     if (s.done) self.fade = null;
                 }
 
-                const sh_ptr: ?*const EffectShader = if (self.effect_shader) |*sh| sh else null;
+                const sh_ptr: ?*EffectShader = if (self.effect_shader) |*sh| sh else null;
                 const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
                 for (self.surfaces.items) |s| {
-                    s.renderTick(sh_ptr, blit_ptr);
+                    s.renderTick(sh_ptr, &self.gpu_upload_state, blit_ptr);
                 }
                 if (perf_logs_enabled) {
                     const render_tick_end_ns: u64 = sys.monotonicNs();
@@ -1238,11 +1238,7 @@ pub const App = struct {
         };
         self.fade = null;
         self.effect.updatePalette(colors);
-        if (self.effect_shader) |*shader| {
-            shader.useProgram();
-            shader.bindGeometry();
-            shader.uploadPalette(&self.effect);
-        }
+        self.markGpuPaletteDirty();
         self.current_palette = colors;
         const copy_len = @min(name.len, self.active_palette_name_buf.len);
         @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
@@ -1261,11 +1257,7 @@ pub const App = struct {
         if (fade_ms == 0) {
             self.fade = null;
             self.effect.updatePalette(colors);
-            if (self.effect_shader) |*shader| {
-                shader.useProgram();
-                shader.bindGeometry();
-                shader.uploadPalette(&self.effect);
-            }
+            self.markGpuPaletteDirty();
             self.current_palette = colors;
             dispatch.appendOk(out);
             return;
@@ -1331,11 +1323,7 @@ pub const App = struct {
         } else {
             self.effect.setSpeed(cfg.speed);
             self.effect.updatePalette(cfg.palette);
-            if (self.effect_shader) |*shader| {
-                shader.useProgram();
-                shader.bindGeometry();
-                shader.uploadPalette(&self.effect);
-            }
+            self.markGpuPaletteDirty();
         }
         self.current_palette = cfg.palette;
 

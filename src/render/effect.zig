@@ -187,7 +187,7 @@ pub const Effect = union(EffectType) {
         };
     }
 
-    /// Colormix pattern modifiers for setStaticUniforms. Null for non-colormix.
+    /// Colormix pattern modifiers for static uniform upload. Null for non-colormix.
     pub fn patternMods(self: *const Effect) ?struct { cos_mod: f32, sin_mod: f32 } {
         return switch (self.*) {
             .colormix => |*r| .{ .cos_mod = r.pattern_cos_mod, .sin_mod = r.pattern_sin_mod },
@@ -204,7 +204,7 @@ pub const Effect = union(EffectType) {
         };
     }
 
-    /// GPU effect random phase offset for bind/setStaticUniforms. Null for CPU-only effects.
+    /// GPU effect random phase offset for static uniform upload. Null for CPU-only effects.
     pub fn gpuPhase(self: *const Effect) ?f32 {
         return switch (self.*) {
             .colormix => null,
@@ -224,7 +224,7 @@ pub const Effect = union(EffectType) {
     /// Update the palette colors in-place without changing the effect type.
     /// For colormix: rebuilds the 12-cell palette and pre-computed GPU data.
     /// For GPU effects: updates the [3]Rgb palette field.
-    /// Call effect_shader.bind(&effect) after this to re-upload to the GPU.
+    /// Mark the App-owned palette upload state dirty after calling this.
     pub fn updatePalette(self: *Effect, colors: [3]Rgb) void {
         const palette_mod = @import("palette.zig");
         const ColormixShader = @import("colormix_shader.zig").ColormixShader;
@@ -246,7 +246,7 @@ pub const Effect = union(EffectType) {
         }
     }
 
-    /// GPU effect palette for bind/setStaticUniforms. Null for CPU-only effects.
+    /// GPU effect palette for palette upload. Null for CPU-only effects.
     pub fn gpuPalette(self: *const Effect) ?[3]Rgb {
         return switch (self.*) {
             .colormix => null,
