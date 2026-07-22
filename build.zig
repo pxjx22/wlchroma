@@ -233,6 +233,19 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_gpu_upload_state_tests.step);
     test_step.dependOn(&run_gpu_upload_state_tests.step);
 
+    const effect_shader_api_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/effect_shader_api_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    effect_shader_api_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const effect_shader_api_tests = b.addTest(.{
+        .root_module = effect_shader_api_test_mod,
+    });
+    const run_effect_shader_api_tests = b.addRunArtifact(effect_shader_api_tests);
+    phase2_test_step.dependOn(&run_effect_shader_api_tests.step);
+    test_step.dependOn(&run_effect_shader_api_tests.step);
+
     const surface_detach_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/surface_detach_test.zig"),
         .target = target,

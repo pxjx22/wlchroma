@@ -568,9 +568,14 @@ pub const App = struct {
                     const shader_init_ms = @as(f64, @floatFromInt(shader_init_end_ns - shader_init_start_ns)) / std.time.ns_per_ms;
                     std.debug.print("perf: effect shader init for {s} took {d:.2}ms\n", .{ @tagName(self.effect), shader_init_ms });
                 }
-                // Bind invariant GL state once -- program, VBO, vertex layout,
-                // and effect-specific static data (palette / phase).
-                if (self.effect_shader) |*sh| sh.bind(&self.effect);
+                // Initialize the effect program, geometry, and palette while
+                // this surface's EGL context is current. Static uniforms are
+                // uploaded by SurfaceState's existing first-render branch.
+                if (self.effect_shader) |*sh| {
+                    sh.useProgram();
+                    sh.bindGeometry();
+                    sh.uploadPalette(&self.effect);
+                }
 
                 // Initialize blit shader for offscreen upscale pass.
                 if (self.renderer_scale < 1.0) {
@@ -654,8 +659,12 @@ pub const App = struct {
         };
         if (self.blit_shader) |*bs| bs.bind();
         // bind() leaves the blit program/VBO as current GL state; restore the
-        // effect program so per-frame uniform uploads hit the right program.
-        if (self.effect_shader) |*sh| sh.bind(&self.effect);
+        // effect program and geometry so per-frame uploads and draws hit the
+        // right pipeline without redundantly uploading program-global data.
+        if (self.effect_shader) |*sh| {
+            sh.useProgram();
+            sh.bindGeometry();
+        }
     }
 
     pub fn run(self: *App) !void {
@@ -763,7 +772,11 @@ pub const App = struct {
                 if (self.fade) |f| {
                     const s = color_fade.sample(f, sys.monotonicNs());
                     self.effect.updatePalette(s.colors);
-                    if (self.effect_shader) |*sh| sh.bind(&self.effect);
+                    if (self.effect_shader) |*sh| {
+                        sh.useProgram();
+                        sh.bindGeometry();
+                        sh.uploadPalette(&self.effect);
+                    }
                     self.current_palette = s.colors;
                     if (s.done) self.fade = null;
                 }
@@ -1225,7 +1238,11 @@ pub const App = struct {
         };
         self.fade = null;
         self.effect.updatePalette(colors);
-        if (self.effect_shader) |*shader| shader.bind(&self.effect);
+        if (self.effect_shader) |*shader| {
+            shader.useProgram();
+            shader.bindGeometry();
+            shader.uploadPalette(&self.effect);
+        }
         self.current_palette = colors;
         const copy_len = @min(name.len, self.active_palette_name_buf.len);
         @memcpy(self.active_palette_name_buf[0..copy_len], name[0..copy_len]);
@@ -1244,7 +1261,11 @@ pub const App = struct {
         if (fade_ms == 0) {
             self.fade = null;
             self.effect.updatePalette(colors);
-            if (self.effect_shader) |*shader| shader.bind(&self.effect);
+            if (self.effect_shader) |*shader| {
+                shader.useProgram();
+                shader.bindGeometry();
+                shader.uploadPalette(&self.effect);
+            }
             self.current_palette = colors;
             dispatch.appendOk(out);
             return;
@@ -1310,7 +1331,11 @@ pub const App = struct {
         } else {
             self.effect.setSpeed(cfg.speed);
             self.effect.updatePalette(cfg.palette);
-            if (self.effect_shader) |*shader| shader.bind(&self.effect);
+            if (self.effect_shader) |*shader| {
+                shader.useProgram();
+                shader.bindGeometry();
+                shader.uploadPalette(&self.effect);
+            }
         }
         self.current_palette = cfg.palette;
 

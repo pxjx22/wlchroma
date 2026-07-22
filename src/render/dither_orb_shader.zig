@@ -1,5 +1,4 @@
 const StandardShader = @import("standard_shader.zig").StandardShader;
-const Rgb = @import("../config/defaults.zig").Rgb;
 
 pub const DitherOrbShader = struct {
     inner: StandardShader,
@@ -136,14 +135,6 @@ pub const DitherOrbShader = struct {
 
     pub fn init() !DitherOrbShader {
         return .{ .inner = try StandardShader.init(frag_src) };
-    }
-
-    pub fn bind(self: *DitherOrbShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.bind(phase, palette);
-    }
-
-    pub fn setStaticUniforms(self: *const DitherOrbShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.setStaticUniforms(phase, palette);
     }
 
     pub fn setUniforms(self: *const DitherOrbShader, time: f32, w: f32, h: f32) void {

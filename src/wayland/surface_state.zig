@@ -157,7 +157,7 @@ pub const SurfaceState = struct {
 
             if (shader) |sh| {
                 if (self.needs_static_uniforms) {
-                    sh.setStaticUniforms(self.effect);
+                    sh.uploadStatic(self.effect);
                     self.needs_static_uniforms = false;
                 }
 

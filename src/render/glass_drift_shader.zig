@@ -14,7 +14,7 @@ pub const GlassDriftShader = struct {
     u_col0_loc: c.GLint,
     u_col1_loc: c.GLint,
     u_col2_loc: c.GLint,
-    /// Debug-only flag: set to true after bind() is called.
+    /// Debug-only flag: set to true after bindGeometry() is called.
     bound: bool,
 
     // Vertex shader: identical pass-through to ColormixShader
@@ -150,10 +150,11 @@ pub const GlassDriftShader = struct {
         };
     }
 
-    /// Bind GL state and upload static uniforms (phase + palette).
-    /// Call once after the EGL context is made current.
-    pub fn bind(self: *GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
+    pub fn useProgram(self: *const GlassDriftShader) void {
         c.glUseProgram(self.program);
+    }
+
+    pub fn bindGeometry(self: *GlassDriftShader) void {
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
         c.glVertexAttribPointer(
@@ -164,17 +165,10 @@ pub const GlassDriftShader = struct {
             0,
             @as(?*const anyopaque, null),
         );
-        uploadStaticUniforms(self, phase_offset, palette);
         self.bound = true;
     }
 
-    /// Re-upload static uniforms after configure/resize (program must be current).
-    pub fn setStaticUniforms(self: *const GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
-        uploadStaticUniforms(self, phase_offset, palette);
-    }
-
-    fn uploadStaticUniforms(self: *const GlassDriftShader, phase_offset: f32, palette: [3]Rgb) void {
-        c.glUniform1f(self.u_phase_loc, phase_offset);
+    pub fn uploadPalette(self: *const GlassDriftShader, palette: [3]Rgb) void {
         inline for (palette, 0..) |rgb, i| {
             const loc = switch (i) {
                 0 => self.u_col0_loc,
@@ -189,6 +183,10 @@ pub const GlassDriftShader = struct {
                 @as(f32, @floatFromInt(rgb.b)) / 255.0,
             );
         }
+    }
+
+    pub fn uploadStatic(self: *const GlassDriftShader, phase: f32) void {
+        c.glUniform1f(self.u_phase_loc, phase);
     }
 
     /// Upload per-frame uniforms: time and resolution.

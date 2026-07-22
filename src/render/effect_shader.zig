@@ -50,107 +50,53 @@ pub const EffectShader = union(EffectType) {
         };
     }
 
-    /// Bind invariant GL state (program, VBO, vertex layout, static data).
-    /// Call once after EGL context is current. For colormix: uploads palette.
-    /// For glass_drift: uploads phase offset + palette.
-    pub fn bind(self: *EffectShader, effect: *const Effect) void {
+    pub fn useProgram(self: *const EffectShader) void {
         switch (self.*) {
-            .colormix => |*sh| {
+            .colormix => |*shader| shader.useProgram(),
+            .glass_drift => |*shader| shader.useProgram(),
+            inline else => |*shader| shader.inner.useProgram(),
+        }
+    }
+
+    pub fn bindGeometry(self: *EffectShader) void {
+        switch (self.*) {
+            .colormix => |*shader| shader.bindGeometry(),
+            .glass_drift => |*shader| shader.bindGeometry(),
+            inline else => |*shader| shader.inner.bindGeometry(),
+        }
+    }
+
+    pub fn uploadPalette(self: *const EffectShader, effect: *const Effect) void {
+        switch (self.*) {
+            .colormix => |*shader| {
                 std.debug.assert(effect.paletteData() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.paletteData().?);
+                shader.uploadPalette(effect.paletteData().?);
             },
-            .glass_drift => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            .glass_drift => |*shader| {
+                std.debug.assert(effect.gpuPalette() != null); // Effect and EffectShader variants must match
+                shader.uploadPalette(effect.gpuPalette().?);
             },
-            .frond_haze => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .lumen_tunnel => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .velvet_mesh => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .starfield_fog => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .gyro_echo => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .hex_floret => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .dither_orb => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .signal_matrix => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .fract_lattice => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.bind(effect.gpuPhase().?, effect.gpuPalette().?);
+            inline else => |*shader| {
+                std.debug.assert(effect.gpuPalette() != null); // Effect and EffectShader variants must match
+                shader.inner.uploadPalette(effect.gpuPalette().?);
             },
         }
     }
 
-    /// Upload static uniforms that change only on configure/resize.
-    /// For colormix: cos_mod + sin_mod. For glass_drift: phase_offset + palette.
-    /// Assumes the effect program is already current (bound via bind()).
-    pub fn setStaticUniforms(self: *const EffectShader, effect: *const Effect) void {
+    pub fn uploadStatic(self: *const EffectShader, effect: *const Effect) void {
         switch (self.*) {
-            .colormix => |*sh| {
+            .colormix => |*shader| {
                 std.debug.assert(effect.patternMods() != null); // Effect and EffectShader variants must match
                 const mods = effect.patternMods().?;
-                sh.setStaticUniforms(mods.cos_mod, mods.sin_mod);
+                shader.uploadStatic(mods.cos_mod, mods.sin_mod);
             },
-            .glass_drift => |*sh| {
+            .glass_drift => |*shader| {
                 std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+                shader.uploadStatic(effect.gpuPhase().?);
             },
-            .frond_haze => |*sh| {
+            inline else => |*shader| {
                 std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .lumen_tunnel => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .velvet_mesh => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .starfield_fog => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .gyro_echo => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .hex_floret => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .dither_orb => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .signal_matrix => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
-            },
-            .fract_lattice => |*sh| {
-                std.debug.assert(effect.gpuPhase() != null); // Effect and EffectShader variants must match
-                sh.setStaticUniforms(effect.gpuPhase().?, effect.gpuPalette().?);
+                shader.inner.uploadStatic(effect.gpuPhase().?);
             },
         }
     }
@@ -179,7 +125,7 @@ pub const EffectShader = union(EffectType) {
         }
     }
 
-    /// Draw the fullscreen quad. Assumes bind() and setUniforms() were called.
+    /// Draw the fullscreen quad. Assumes bindGeometry() and setUniforms() were called.
     pub fn draw(self: *const EffectShader) void {
         switch (self.*) {
             .colormix => |*sh| sh.draw(),

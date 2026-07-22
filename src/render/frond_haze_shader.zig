@@ -1,5 +1,4 @@
 const StandardShader = @import("standard_shader.zig").StandardShader;
-const Rgb = @import("../config/defaults.zig").Rgb;
 
 pub const FrondHazeShader = struct {
     inner: StandardShader,
@@ -109,14 +108,6 @@ pub const FrondHazeShader = struct {
 
     pub fn init() !FrondHazeShader {
         return .{ .inner = try StandardShader.init(frag_src) };
-    }
-
-    pub fn bind(self: *FrondHazeShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.bind(phase, palette);
-    }
-
-    pub fn setStaticUniforms(self: *const FrondHazeShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.setStaticUniforms(phase, palette);
     }
 
     pub fn setUniforms(self: *const FrondHazeShader, time: f32, w: f32, h: f32) void {

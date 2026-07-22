@@ -14,8 +14,8 @@ pub const ColormixShader = struct {
     u_cos_mod_loc: c.GLint,
     u_sin_mod_loc: c.GLint,
     u_palette_loc: c.GLint,
-    /// Debug-only flag: set to true after bind() is called. draw() asserts
-    /// this in debug builds to catch missing bind() calls.
+    /// Debug-only flag: set after bindGeometry(). draw() asserts this in
+    /// debug builds to catch missing geometry setup.
     bound: bool,
 
     // Vertex shader: pass-through, position from attribute
@@ -142,10 +142,11 @@ pub const ColormixShader = struct {
         };
     }
 
-    /// Bind invariant GL state: program, VBO, vertex layout, and palette.
-    /// Call once after the EGL context is made current.
-    pub fn bind(self: *ColormixShader, palette_data: *const [36]f32) void {
+    pub fn useProgram(self: *const ColormixShader) void {
         c.glUseProgram(self.program);
+    }
+
+    pub fn bindGeometry(self: *ColormixShader) void {
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
         c.glVertexAttribPointer(
@@ -156,12 +157,22 @@ pub const ColormixShader = struct {
             0,
             @as(?*const anyopaque, null),
         );
-        c.glUniform3fv(self.u_palette_loc, 12, @as([*c]const c.GLfloat, @ptrCast(palette_data)));
         self.bound = true;
     }
 
-    /// Upload cos_mod/sin_mod once after bind() and on each resize.
-    pub fn setStaticUniforms(self: *const ColormixShader, cos_mod: f32, sin_mod: f32) void {
+    pub fn uploadPalette(self: *const ColormixShader, data: *const [36]f32) void {
+        c.glUniform3fv(
+            self.u_palette_loc,
+            12,
+            @as([*c]const c.GLfloat, @ptrCast(data)),
+        );
+    }
+
+    pub fn uploadStatic(
+        self: *const ColormixShader,
+        cos_mod: f32,
+        sin_mod: f32,
+    ) void {
         c.glUniform1f(self.u_cos_mod_loc, cos_mod);
         c.glUniform1f(self.u_sin_mod_loc, sin_mod);
     }

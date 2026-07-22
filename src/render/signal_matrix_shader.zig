@@ -1,5 +1,4 @@
 const StandardShader = @import("standard_shader.zig").StandardShader;
-const Rgb = @import("../config/defaults.zig").Rgb;
 
 pub const SignalMatrixShader = struct {
     inner: StandardShader,
@@ -109,14 +108,6 @@ pub const SignalMatrixShader = struct {
 
     pub fn init() !SignalMatrixShader {
         return .{ .inner = try StandardShader.init(frag_src) };
-    }
-
-    pub fn bind(self: *SignalMatrixShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.bind(phase, palette);
-    }
-
-    pub fn setStaticUniforms(self: *const SignalMatrixShader, phase: f32, palette: [3]Rgb) void {
-        self.inner.setStaticUniforms(phase, palette);
     }
 
     pub fn setUniforms(self: *const SignalMatrixShader, time: f32, w: f32, h: f32) void {

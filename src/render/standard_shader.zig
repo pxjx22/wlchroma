@@ -16,7 +16,7 @@ pub const StandardShader = struct {
     u_col0_loc: c.GLint,
     u_col1_loc: c.GLint,
     u_col2_loc: c.GLint,
-    /// Debug-only flag: set to true after bind() is called.
+    /// Debug-only flag: set to true after bindGeometry() is called.
     bound: bool,
 
     /// Shared vertex shader: pass-through a_pos to clip space.
@@ -103,10 +103,11 @@ pub const StandardShader = struct {
         };
     }
 
-    /// Bind GL state and upload static uniforms (phase + palette).
-    /// Call once after the EGL context is made current.
-    pub fn bind(self: *StandardShader, phase: f32, palette: [3]Rgb) void {
+    pub fn useProgram(self: *const StandardShader) void {
         c.glUseProgram(self.program);
+    }
+
+    pub fn bindGeometry(self: *StandardShader) void {
         c.glBindBuffer(c.GL_ARRAY_BUFFER, self.vbo);
         c.glEnableVertexAttribArray(self.a_pos_loc);
         c.glVertexAttribPointer(
@@ -117,19 +118,10 @@ pub const StandardShader = struct {
             0,
             @as(?*const anyopaque, null),
         );
-        uploadStaticUniforms(self, phase, palette);
         self.bound = true;
     }
 
-    /// Re-upload static uniforms after configure/resize (program must be current).
-    pub fn setStaticUniforms(self: *const StandardShader, phase: f32, palette: [3]Rgb) void {
-        uploadStaticUniforms(self, phase, palette);
-    }
-
-    fn uploadStaticUniforms(self: *const StandardShader, phase: f32, palette: [3]Rgb) void {
-        if (self.u_phase_loc >= 0) {
-            c.glUniform1f(self.u_phase_loc, phase);
-        }
+    pub fn uploadPalette(self: *const StandardShader, palette: [3]Rgb) void {
         inline for (palette, 0..) |rgb, i| {
             const loc = switch (i) {
                 0 => self.u_col0_loc,
@@ -146,6 +138,10 @@ pub const StandardShader = struct {
                 );
             }
         }
+    }
+
+    pub fn uploadStatic(self: *const StandardShader, phase: f32) void {
+        if (self.u_phase_loc >= 0) c.glUniform1f(self.u_phase_loc, phase);
     }
 
     /// Upload per-frame uniforms: time and resolution.
