@@ -17,7 +17,7 @@ const SignalMatrixShader = @import("signal_matrix_shader.zig").SignalMatrixShade
 const FractLatticeShader = @import("fract_lattice_shader.zig").FractLatticeShader;
 
 /// GPU pipeline abstraction. App owns one ?EffectShader (null when GPU
-/// unavailable). SurfaceState receives a const pointer per renderTick call.
+/// unavailable). SurfaceState receives a mutable pointer per renderTick call.
 /// The tagged union dispatches all GL operations to the active shader without
 /// the render loop knowing which effect is selected.
 pub const EffectShader = union(EffectType) {

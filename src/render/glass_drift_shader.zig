@@ -32,7 +32,7 @@ pub const GlassDriftShader = struct {
     // Uniforms:
     //   u_time       f32  — frameCount * TIME_SCALE * speed (per-frame)
     //   u_resolution vec2 — output pixel dimensions (per-surface)
-    //   u_phase      f32  — random session offset (static, set once in bind)
+    //   u_phase      f32  — random session offset (static, set once by uploadStatic)
     //   u_col0       vec3 — base color       (palette[0])
     //   u_col1       vec3 — primary tint     (palette[1])
     //   u_col2       vec3 — secondary tint   (palette[2])

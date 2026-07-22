@@ -188,7 +188,7 @@ pub const Effect = union(EffectType) {
         }
     }
 
-    /// Colormix palette data for ColormixShader.bind. Null for non-colormix effects.
+    /// Colormix palette data for ColormixShader.uploadPalette. Null for non-colormix effects.
     pub fn paletteData(self: *const Effect) ?*const [36]f32 {
         return switch (self.*) {
             .colormix => |*r| &r.palette_data,
