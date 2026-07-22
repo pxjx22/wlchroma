@@ -45,12 +45,12 @@ Each phase receives its own approved design, TDD implementation plan, focused co
 | IPC-L2 | Low | 1 | The documented 4096-byte line boundary is off by one | Fixed (`a50a8c8`, `49a82b5`) |
 | IPC-L3 | Low | 1 | No-argument commands accept ignored trailing arguments | Fixed (`f4fcb58`) |
 | APP-L1 | Low | 1 | Signalfd data is read from an undefined buffer without validating read length | Fixed (`18d7cec`, `49a82b5`) |
-| WL-H1 | High | 2 | GPU fallback can leave a stale borrowed EGL-context pointer | Open |
-| WL-H2 | High | 2 | Compositor dimensions reach C APIs without checked narrowing | Open |
-| GPU-M1 | Medium | 2 | Zero-output effect switching leaks shader programs and VBOs | Open |
-| GPU-M2 | Medium | 2 | Failed `makeCurrent` paths lose offscreen FBO and texture ownership | Open |
-| GPU-M3 | Medium | 2 | EGL cleanup can destroy a current surface or issue GL calls without a context | Open |
-| WL-L1 | Low | 2 | A bound `wl_output` proxy leaks if `OutputInfo` allocation fails | Open |
+| WL-H1 | High | 2 | GPU fallback can leave a stale borrowed EGL-context pointer | Fixed (`d13bcc0`, `376cea0`) |
+| WL-H2 | High | 2 | Compositor dimensions reach C APIs without checked narrowing | Fixed (`51b29d6`, `90ac27e`) |
+| GPU-M1 | Medium | 2 | Zero-output effect switching leaks shader programs and VBOs | Fixed (`d13bcc0`, `cfa7809`) |
+| GPU-M2 | Medium | 2 | Failed `makeCurrent` paths lose offscreen FBO and texture ownership | Fixed (`d13bcc0`, `cfa7809`) |
+| GPU-M3 | Medium | 2 | EGL cleanup can destroy a current surface or issue GL calls without a context | Fixed (`b8ffaaf`, `366e2c1`, `d13bcc0`) |
+| WL-L1 | Low | 2 | A bound `wl_output` proxy leaks if `OutputInfo` allocation fails | Fixed (`77e3bd3`) |
 | GPU-M4 | Medium | 3 | Palette uploads can be lost when no EGL context is current | Open |
 | GPU-M5 | Medium | 3 | Switching to colormix leaves pattern uniforms at defaults | Open |
 | GPU-M6 | Medium | 3 | Colormix shader failure produces a black EGL surface instead of SHM fallback | Open |
@@ -195,3 +195,19 @@ Update the finding ledger and append phase verification evidence as fixes land. 
 - **Static evidence:** `git diff --check` passed; the legacy IPC scan found no `readLine`, `writeLine`, `writev`, `LINE_MAX`, `SO_RCVTIMEO`, direct dispatch writer, or fd-taking command handler.
 - **Review evidence:** Tasks 1–5 passed read-only implementation reviews; Task 4 also passed a separate adversarial I/O audit. Two independent Task 6 review attempts terminated at the provider usage limit, so the controller completed a documented line-by-line fallback review of the 1,211-line package with no Critical, Important, or Minor findings.
 - **Live scope:** no daemon was running after the laptop reboot, so the optional existing-daemon `wlchroma-ctl query` smoke test was skipped. No daemon was started, stopped, or replaced, and no display was disabled.
+
+### Phase 2: Wayland/EGL safety — 2026-07-20 to 2026-07-22
+
+- **Disposition:** `WL-H1`, `WL-H2`, `GPU-M1`, `GPU-M2`, `GPU-M3`, and `WL-L1` are fixed. Their original descriptions remain unchanged in the ledger.
+- **Implementation commits:** `51b29d6` (checked protocol extents and SHM layout), `90ac27e` (validated compositor-dimension consumers and transactional SHM replacement), `77e3bd3` (transactional output registration), `b8ffaaf` (driver-independent GPU epoch orchestration), `102776a` (lifecycle coverage strengthening), `366e2c1` (confirmed EGL current ownership), `d13bcc0` (centralized GPU detachment and epoch teardown), `376cea0` (safe null-context last-surface retirement), `cfa7809` (recoverable hotplug epochs and transactional filter replacement), and `0060d08` (active/permanent epoch hot-path short-circuiting).
+- **Focused verification:** `zig build test-wayland-egl --summary all` passed `13/13` steps and `41/41` tests. The suite covers checked dimensions/SHM arithmetic, transactional output publication, App-level CPU-only last-surface retirement, GPU epoch state/ordering, and replacement ownership transfer.
+- **Formatting and static evidence:** `zig fmt --check build.zig src tests` and `git diff --check` exited zero. The ownership-loss scan found no `orphan`, `offscreen FBO leaked`, `GL cleanup may be incomplete`, or `dropOffscreenForFilterChange` path. The compositor-narrowing scan found only the two intentional `Extent.init` casts after explicit nonzero and `maxInt(i32)` validation.
+- **Debug:** executable build `9/9`; host full graph `27/27`, `130/130` tests passed; all `48/48` direct configuration-parser tests passed.
+- **ReleaseSafe:** executable build `9/9`; host full graph `27/27`, `130/130` tests passed.
+- **ReleaseFast:** executable build `9/9`; host full graph `27/27`, `130/130` tests passed without overflow- or UB-sensitive failures.
+- **Sandbox note:** each full graph under restricted socket syscalls reproduced only the known 11 environmental IPC failures (`2` signalfd, `5` connection, `4` server); the identical host-syscall runs passed all tests. No IPC code changed in Phase 2.
+- **Review evidence:** every implementation task passed an independent read-only review. Review found one Important null-context retirement defect and one required Minor hot-path scan; both received focused RED/GREEN regressions in `376cea0` and `0060d08` and passed re-review. The EGL teardown review confirmed that a failed best-effort unbind does not immediately destroy a current EGL surface because EGL defers actual destruction until the surface is no longer current.
+- **Live environment:** Niri `26.04` on `eDP-1` at `1920x1200`, scale `1.0`. This session exposed no secondary output, so survivor rendering during a non-primary unplug could not be exercised; the complete-output-loss path was exercised twice instead.
+- **Live rendering:** an isolated ReleaseSafe daemon (PID `17817`) rendered colormix and the GPU-only `glass_drift` effect; screenshots recorded both modes. A nearest-to-linear filter reload and renderer-scale change from `0.20` to `0.50` completed without errors. Temporarily changing Niri output scale from `1.0` to `1.1` produced a checked EGL reconfigure at `1745x1091`; restoring scale `1.0` returned to `1920x1200` while the same daemon stayed responsive.
+- **Zero-output recovery:** a user-systemd recovery command using the explicit current `NIRI_SOCKET` and absolute `/usr/sbin/niri` path was dry-run while the display remained enabled. During output loss, wlchroma reaped the surface and disarmed the frame timer; an output-less reload selected `glass_drift` without converting it to CPU colormix. The first 20-second watchdog fired just before Niri completed its delayed off transition, so the later off won that test-harness race and the display was restored manually. A corrected 30-second independent watchdog then restored `eDP-1` automatically. The same PID survived, IPC still reported `glass_drift`, and the journal recorded a fresh EGL 1.5/ES2 context, surface, and armed timer after output return.
+- **Shutdown and restoration:** the exact test daemon stopped through IPC; its transient unit became inactive with no stale-pointer, resource-loss, EGL, or allocator warning in the journal. The user's original main-checkout daemon was restored under user-systemd as PID `34684` with the normal colormix, 24 FPS, scale `0.20` configuration. The display remained enabled at scale `1.0`; the lock screen required normal local unlock after display power cycling.
