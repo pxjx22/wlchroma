@@ -233,6 +233,19 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_gpu_upload_state_tests.step);
     test_step.dependOn(&run_gpu_upload_state_tests.step);
 
+    const gpu_fallback_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/gpu_fallback_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gpu_fallback_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const gpu_fallback_tests = b.addTest(.{
+        .root_module = gpu_fallback_test_mod,
+    });
+    const run_gpu_fallback_tests = b.addRunArtifact(gpu_fallback_tests);
+    phase2_test_step.dependOn(&run_gpu_fallback_tests.step);
+    test_step.dependOn(&run_gpu_fallback_tests.step);
+
     const effect_shader_api_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/effect_shader_api_test.zig"),
         .target = target,

@@ -152,6 +152,24 @@ pub const Effect = union(EffectType) {
         };
     }
 
+    /// Replace a GPU-only effect with its permanent CPU/SHM fallback while
+    /// preserving the configured animation cadence. Existing colormix state
+    /// is already CPU-capable and remains untouched.
+    pub fn fallbackToColormix(self: *Effect, colors: [3]Rgb) bool {
+        if (!self.isGpuOnly()) return false;
+
+        const advance_ms = self.frameAdvanceMs();
+        const current_speed = self.speed();
+        self.* = .{ .colormix = ColormixRenderer.init(
+            colors[0],
+            colors[1],
+            colors[2],
+            advance_ms,
+            current_speed,
+        ) };
+        return true;
+    }
+
     /// CPU render grid (SHM fallback path). Only implemented for colormix.
     /// Returns without doing anything for GPU-only effects.
     pub fn renderGrid(self: *const Effect, grid_w: usize, grid_h: usize, out: []Rgb) void {
