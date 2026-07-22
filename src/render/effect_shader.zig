@@ -35,6 +35,7 @@ pub const EffectShader = union(EffectType) {
 
     /// Compile and link the appropriate shader program for the given Effect.
     pub fn init(effect: *const Effect) !EffectShader {
+        try @import("shader_init_policy.zig").beforeInitialization();
         return switch (effect.*) {
             .colormix => EffectShader{ .colormix = try ColormixShader.init() },
             .glass_drift => EffectShader{ .glass_drift = try GlassDriftShader.init() },

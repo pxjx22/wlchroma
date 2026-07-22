@@ -3,6 +3,17 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const force_shader_failure = b.option(
+        bool,
+        "phase3a-force-shader-init-failure",
+        "Force effect shader initialization to fail before any GL object is created",
+    ) orelse false;
+    const daemon_options = b.addOptions();
+    daemon_options.addOption(
+        bool,
+        "phase3a_force_shader_init_failure",
+        force_shader_failure,
+    );
 
     // wlr-layer-shell protocol
     const xml = b.path("protocols/wlr-layer-shell-unstable-v1.xml");
@@ -45,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.addImport("sys", sys_mod);
+    mod.addOptions("build_options", daemon_options);
 
     mod.addCSourceFile(.{ .file = src, .flags = &.{} });
     mod.addCSourceFile(.{ .file = xdg_src, .flags = &.{} });
@@ -159,6 +171,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     src_exports_mod.addImport("sys", sys_mod);
+    src_exports_mod.addOptions("build_options", daemon_options);
 
     const phase2_test_step = b.step(
         "test-wayland-egl",
@@ -172,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     wayland_exports_mod.addImport("sys", sys_mod);
+    wayland_exports_mod.addOptions("build_options", daemon_options);
     wayland_exports_mod.addCSourceFile(.{ .file = src, .flags = &.{} });
     wayland_exports_mod.addCSourceFile(.{ .file = xdg_src, .flags = &.{} });
     wayland_exports_mod.addIncludePath(hdr.dirname());
@@ -258,6 +272,56 @@ pub fn build(b: *std.Build) void {
     const run_effect_shader_api_tests = b.addRunArtifact(effect_shader_api_tests);
     phase2_test_step.dependOn(&run_effect_shader_api_tests.step);
     test_step.dependOn(&run_effect_shader_api_tests.step);
+
+    const policy_test_sources = b.addWriteFiles();
+    const normal_policy_source = policy_test_sources.addCopyFile(
+        b.path("src/render/shader_init_policy.zig"),
+        "normal/shader_init_policy.zig",
+    );
+    const forced_policy_source = policy_test_sources.addCopyFile(
+        b.path("src/render/shader_init_policy.zig"),
+        "forced/shader_init_policy.zig",
+    );
+
+    const normal_policy_mod = b.createModule(.{
+        .root_source_file = normal_policy_source,
+        .target = target,
+        .optimize = optimize,
+    });
+    const normal_policy_options = b.addOptions();
+    normal_policy_options.addOption(
+        bool,
+        "phase3a_force_shader_init_failure",
+        false,
+    );
+    normal_policy_mod.addOptions("build_options", normal_policy_options);
+
+    const forced_policy_mod = b.createModule(.{
+        .root_source_file = forced_policy_source,
+        .target = target,
+        .optimize = optimize,
+    });
+    const forced_policy_options = b.addOptions();
+    forced_policy_options.addOption(
+        bool,
+        "phase3a_force_shader_init_failure",
+        true,
+    );
+    forced_policy_mod.addOptions("build_options", forced_policy_options);
+
+    const shader_init_policy_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/shader_init_policy_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shader_init_policy_test_mod.addImport("normal_policy", normal_policy_mod);
+    shader_init_policy_test_mod.addImport("forced_policy", forced_policy_mod);
+    const shader_init_policy_tests = b.addTest(.{
+        .root_module = shader_init_policy_test_mod,
+    });
+    const run_shader_init_policy_tests = b.addRunArtifact(shader_init_policy_tests);
+    phase2_test_step.dependOn(&run_shader_init_policy_tests.step);
+    test_step.dependOn(&run_shader_init_policy_tests.step);
 
     const surface_detach_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/surface_detach_test.zig"),
