@@ -11,6 +11,7 @@ const FakeState = struct {
     bind_calls: usize = 0,
     listener_calls: usize = 0,
     release_calls: usize = 0,
+    release_observed_output_len: usize = std.math.maxInt(usize),
     listener_userdata: ?*OutputInfo = null,
 };
 
@@ -35,6 +36,7 @@ fn fakeAddListener(context: ?*anyopaque, _: *c.wl_output, info: *OutputInfo) c_i
 
 fn fakeRelease(context: ?*anyopaque, _: *c.wl_output) void {
     const state: *FakeState = @ptrCast(@alignCast(context));
+    state.release_observed_output_len = state.outputs.items.len;
     state.release_calls += 1;
 }
 
@@ -103,6 +105,7 @@ test "listener failure removes the appended userdata before release" {
     );
     try std.testing.expectEqual(@as(usize, 1), state.listener_calls);
     try std.testing.expectEqual(@as(usize, 1), state.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), state.release_observed_output_len);
     try std.testing.expectEqual(@as(usize, 0), outputs.items.len);
 }
 
