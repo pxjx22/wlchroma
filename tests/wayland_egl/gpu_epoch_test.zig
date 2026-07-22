@@ -293,24 +293,19 @@ test "context creation failure latches and is never retried" {
     try std.testing.expectEqual(@as(usize, 0), ops.generations_created);
 }
 
-test "only permanent GPU failure forces a GPU-only effect to CPU" {
-    try std.testing.expect(!gpu_epoch.requiresCpuFallback(false, true));
-    try std.testing.expect(!gpu_epoch.requiresCpuFallback(true, false));
-    try std.testing.expect(gpu_epoch.requiresCpuFallback(true, true));
-}
-
 test "recoverable idle state does not latch fallback and restarts on return" {
     const permanent_failure = false;
-    try std.testing.expect(!gpu_epoch.requiresCpuFallback(permanent_failure, true));
     for (0..3) |_| {
         try std.testing.expect(!gpu_epoch.shouldStart(false, permanent_failure, 0));
     }
     try std.testing.expect(gpu_epoch.shouldStart(false, permanent_failure, 1));
 }
 
-test "permanent context failure still forces a GPU-only effect to CPU" {
-    try std.testing.expect(gpu_epoch.requiresCpuFallback(true, true));
-    try std.testing.expect(!gpu_epoch.shouldStart(false, true, 1));
+test "GPU epoch no longer owns CPU fallback policy" {
+    try std.testing.expect(!@hasDecl(
+        gpu_epoch,
+        "requiresCpu" ++ "Fallback",
+    ));
 }
 
 test "failed current acquisition retains ownership until context destruction" {

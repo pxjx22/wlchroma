@@ -6,10 +6,10 @@ const c = @import("wl.zig").c;
 const Registry = @import("wayland/registry.zig").Registry;
 const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
-const ColormixRenderer = @import("render/colormix.zig").ColormixRenderer;
 const Effect = @import("render/effect.zig").Effect;
 const EglContext = @import("render/egl_context.zig").EglContext;
 const gpu_epoch = @import("render/gpu_epoch.zig");
+const gpu_fallback = @import("render/gpu_fallback.zig");
 const shader_mod = @import("render/shader.zig");
 const BlitShader = shader_mod.BlitShader;
 const EffectShader = @import("render/effect_shader.zig").EffectShader;
@@ -56,6 +56,7 @@ pub const App = struct {
     /// Set when GPU pipeline init failed permanently (shader compile/link or
     /// no surface could be made current); prevents retrying every tick.
     gpu_pipeline_failed: bool,
+    gpu_fallback_applied: bool,
     /// Frame timer state: armed while at least one surface exists, disarmed
     /// at zero surfaces so an output-less daemon sleeps at ~0% CPU.
     timer_armed: bool,
@@ -128,6 +129,7 @@ pub const App = struct {
             .gpu_upload_state = .{},
             .blit_shader = null,
             .gpu_pipeline_failed = false,
+            .gpu_fallback_applied = false,
             .timer_armed = false,
             .running = true,
             .frame_interval_ns = config.frame_interval_ns,
@@ -352,9 +354,7 @@ pub const App = struct {
             }
 
             if (detached.offscreen != null) {
-                self.gpu_pipeline_failed = true;
-                self.closeGpuEpoch();
-                for (self.surfaces.items) |survivor| survivor.configureCpuFallbackAfterDetach();
+                self.enterPermanentGpuFallback();
                 return;
             }
         }
@@ -440,6 +440,7 @@ pub const App = struct {
                 std.debug.assert(surface.egl_surface == null);
                 std.debug.assert(surface.offscreen == null);
             }
+            self.gpu_upload_state.clear();
             return;
         };
         var ops = GpuEpochOps{ .app = self, .ctx = ctx };
@@ -477,7 +478,7 @@ pub const App = struct {
         pub fn createContext(self: *StartGpuEpochOps) bool {
             self.app.egl_ctx = EglContext.init(self.app.display) catch |err| {
                 std.debug.print("EGL init failed: {}, falling back to CPU path\n", .{err});
-                self.app.gpu_pipeline_failed = true;
+                self.app.enterPermanentGpuFallback();
                 return false;
             };
             return true;
@@ -510,24 +511,63 @@ pub const App = struct {
         return gpu_epoch.acquireCurrent(CurrentGpuOps, &ops);
     }
 
-    fn applyPermanentGpuFallback(self: *App) void {
-        if (!gpu_epoch.requiresCpuFallback(
-            self.gpu_pipeline_failed,
-            self.effect.isGpuOnly(),
-        )) return;
+    const PermanentGpuFallbackOps = struct {
+        app: *App,
 
-        std.debug.print("effect {s} requires GPU; falling back to colormix on CPU path\n", .{@tagName(self.effect)});
-        const colors = self.effect.gpuPalette().?;
-        const frame_advance_ms = self.effect.frameAdvanceMs();
-        const speed = self.effect.speed();
-        self.effect = Effect{ .colormix = ColormixRenderer.init(
-            colors[0],
-            colors[1],
-            colors[2],
-            frame_advance_ms,
-            speed,
-        ) };
-        for (self.surfaces.items) |surface| surface.shm_effect = null;
+        pub fn permanentFailure(self: *@This()) bool {
+            return self.app.gpu_pipeline_failed;
+        }
+
+        pub fn fallbackApplied(self: *@This()) bool {
+            return self.app.gpu_fallback_applied;
+        }
+
+        pub fn closeGpuEpoch(self: *@This()) void {
+            self.app.closeGpuEpoch();
+        }
+
+        pub fn effectIsGpuOnly(self: *@This()) bool {
+            return self.app.effect.isGpuOnly();
+        }
+
+        pub fn currentPalette(self: *@This()) [3]defaults.Rgb {
+            return self.app.current_palette;
+        }
+
+        pub fn replaceWithColormix(
+            self: *@This(),
+            colors: [3]defaults.Rgb,
+        ) void {
+            _ = self.app.effect.fallbackToColormix(colors);
+        }
+
+        pub fn invalidateCpuStandins(self: *@This()) void {
+            for (self.app.surfaces.items) |surface| surface.shm_effect = null;
+        }
+
+        pub fn configureCpuSurfaces(self: *@This()) void {
+            for (self.app.surfaces.items) |surface| {
+                surface.configureCpuFallbackAfterDetach();
+            }
+        }
+
+        pub fn markFallbackApplied(self: *@This()) void {
+            self.app.gpu_fallback_applied = true;
+        }
+    };
+
+    fn latchPermanentGpuFailure(self: *App) void {
+        self.gpu_pipeline_failed = true;
+    }
+
+    pub fn applyPermanentGpuFallback(self: *App) void {
+        var ops = PermanentGpuFallbackOps{ .app = self };
+        _ = gpu_fallback.apply(PermanentGpuFallbackOps, &ops);
+    }
+
+    fn enterPermanentGpuFallback(self: *App) void {
+        self.latchPermanentGpuFailure();
+        self.applyPermanentGpuFallback();
     }
 
     fn surfaceForOutput(self: *App, out: *const OutputInfo) ?*SurfaceState {
@@ -564,8 +604,7 @@ pub const App = struct {
                     break :blk null;
                 };
                 if (self.effect_shader == null) {
-                    self.gpu_pipeline_failed = true;
-                    if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
+                    self.enterPermanentGpuFallback();
                     return;
                 }
                 self.gpu_upload_state = GpuUploadState.newGeneration();
@@ -594,8 +633,7 @@ pub const App = struct {
         if (attempted) {
             // EGL surfaces exist but none could be made current.
             std.debug.print("warning: no EGL surface could be made current; using CPU fallback on this session\n", .{});
-            self.gpu_pipeline_failed = true;
-            if (self.effect.isGpuOnly()) self.forceCpuFallbackForGpuOnly();
+            self.enterPermanentGpuFallback();
         }
         // else: no EGL surface yet — try again on a later sync pass.
     }
@@ -616,16 +654,16 @@ pub const App = struct {
                     self.gpu_upload_state.clear();
                 } else {
                     std.debug.print("effect switch: no EGL surface could be made current; closing GPU epoch\n", .{});
-                    self.gpu_pipeline_failed = true;
-                    self.closeGpuEpoch();
-                    for (self.surfaces.items) |surface| {
-                        surface.configureCpuFallbackAfterDetach();
-                    }
+                    // Old program could not be safely retired.
+                    self.latchPermanentGpuFailure();
                 }
             } else unreachable;
         }
 
+        // Publish the requested effect and palette before fallback policy
+        // runs so conversion sees the new selection and authoritative colors.
         self.effect = Effect.init(cfg);
+        self.current_palette = cfg.palette;
 
         // Deliberate zero-output epoch closure remains recoverable. Only a
         // permanent context or pipeline failure changes a GPU-only selection
@@ -1082,14 +1120,6 @@ pub const App = struct {
                     return;
                 },
             }
-        }
-    }
-
-    fn forceCpuFallbackForGpuOnly(self: *App) void {
-        if (!self.effect.isGpuOnly()) return;
-        self.closeGpuEpoch();
-        for (self.surfaces.items) |surface| {
-            surface.configureCpuFallbackAfterDetach();
         }
     }
 

@@ -39,10 +39,6 @@ pub fn start(comptime Ops: type, ops: *Ops) bool {
     return ops.createContext();
 }
 
-pub fn requiresCpuFallback(permanent_failure: bool, gpu_only: bool) bool {
-    return permanent_failure and gpu_only;
-}
-
 pub fn replaceCurrentOwned(comptime Ops: type, ops: *Ops) bool {
     if (!ops.acquireCurrent()) return false;
     const replacement = ops.createReplacement() catch return false;

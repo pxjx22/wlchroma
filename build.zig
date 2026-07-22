@@ -238,7 +238,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    gpu_fallback_test_mod.addImport("wlchroma_src", src_exports_mod);
+    gpu_fallback_test_mod.addImport("wayland_test", wayland_exports_mod);
     const gpu_fallback_tests = b.addTest(.{
         .root_module = gpu_fallback_test_mod,
     });
