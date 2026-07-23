@@ -18,11 +18,11 @@ Replace the single minimal `.github/workflows/ci.yml` with three independent wor
 | Job | Steps |
 |-----|-------|
 | `fmt` | Checkout, install Zig 0.16.0 via `mlugg/setup-zig@v2`, run `zig fmt --check src/ tests/ build.zig` |
-| `custom-checks` | Runs on push and PR (not PR-only). Shell steps: commit message format validation (PR merges validated on the merge commit, single-branch pushes validated on all commits in the push), TOML validity of `config.toml.example`, no committed build artifacts (`zig-out/`, `.zig-cache/`) |
+| `custom-checks` | Runs on push and PR (not PR-only). Shell steps: commit message format validation (push events: all commits in the push range; PR events: all commits from base to head), TOML validity of `config.toml.example`, no committed build artifacts (`zig-out/`, `.zig-cache/`) |
 
 **Custom check details:**
 
-- Commit message format: enforces `<type>(<scope>): <description>` as documented in CONTRIBUTING.md
+- Commit message format: enforces `<type>(<scope>): <description>` as documented in CONTRIBUTING.md. Accepted types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`. Accepted scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`, plus `app` and `security` (both appear in git history). Merge commits are exempt.
 - TOML check: validates `config.toml.example` is parseable (e.g. `python3 -c "import tomllib; tomllib.load(open('config.toml.example','rb'))"`)
 - Build artifact check: `git ls-files zig-out/ .zig-cache/` must return empty
 
@@ -34,7 +34,7 @@ Replace the single minimal `.github/workflows/ci.yml` with three independent wor
 
 - Checkout code
 - Install Zig 0.16.0 (`mlugg/setup-zig@v2`)
-- Install system deps: `libegl1-mesa-dev libgles2-mesa-dev libwayland-bin libwayland-dev wayland-scanner`
+- Install system deps: `libegl1-mesa-dev libgles2-mesa-dev libwayland-bin libwayland-dev` (`wayland-scanner` is provided by `libwayland-bin`; there is no separate Ubuntu package by that name — same list as the existing CI)
 - Run `zig build test` — exercises the complete test suite (unit, IPC, Wayland/EGL lifecycle, effect mutation, color_fade)
 
 This replaces the current convention of only running `zig test src/config/config.zig` in CI.
