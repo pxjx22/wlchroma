@@ -51,7 +51,7 @@ This replaces the current convention of only running `zig test src/config/config
 - Generate changelog from `git log` between this tag and the previous tag
 - Upload `wlchroma` and `wlchroma-ctl` binaries to the GitHub Release via `softprops/action-gh-release@v2`
 
-**Changelog audit caveat:** The release workflow should audit the CHANGELOG (if one exists) in its build/ test step to verify the version in the changelog matches the tag. If no CHANGELOG exists, generate release notes from commit history. This ensures release notes are accurate and complete.
+**Release notes:** Generated from `git log` between the current tag and the previous tag (no CHANGELOG file required).
 
 **Build optimization:** `ReleaseSafe` chosen over `ReleaseFast` — bounds checks are worth keeping for a wallpaper daemon.
 
