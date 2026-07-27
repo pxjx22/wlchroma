@@ -36,6 +36,10 @@ pub const App = struct {
         pub fn retireSurfaceGpu(app: *App, surface: *SurfaceState) void {
             app.retireSurfaceGpu(surface);
         }
+
+        pub fn applyReloadEffectConfig(app: *App, cfg: *const AppConfig) void {
+            app.applyReloadEffectConfig(cfg);
+        }
     } else void;
 
     allocator: std.mem.Allocator,
@@ -50,6 +54,8 @@ pub const App = struct {
     outputs: std.ArrayList(*OutputInfo),
     surfaces: std.ArrayList(*SurfaceState),
     detached_gpu: std.ArrayList(SurfaceState.DetachedGpu),
+    /// Effect identity requested by config, distinct from a fallback renderer.
+    configured_effect_type: config_mod.EffectType,
     effect: Effect,
     /// Authoritative animation timeline shared by every GPU and CPU surface.
     animation: AnimationState,
@@ -127,6 +133,7 @@ pub const App = struct {
             .outputs = .empty,
             .surfaces = .empty,
             .detached_gpu = .empty,
+            .configured_effect_type = config.effect_type,
             .effect = effect,
             .animation = AnimationState.init(config.speed),
             .egl_ctx = null,
@@ -669,6 +676,7 @@ pub const App = struct {
         // Publish the requested effect and palette, then reset the one App
         // timeline before fallback policy runs. Conversion sees the requested
         // selection and authoritative colors but never resets animation.
+        self.configured_effect_type = cfg.effect_type;
         self.effect = Effect.init(cfg);
         self.current_palette = cfg.palette;
         self.animation.reset(cfg.speed);
@@ -1369,7 +1377,16 @@ pub const App = struct {
 
         self.applyScaleNow(cfg.renderer_scale);
         self.fade = null;
-        if (@as(config_mod.EffectType, self.effect) != cfg.effect_type) {
+        self.applyReloadEffectConfig(cfg);
+
+        self.allocator.free(self.palettes);
+        self.palettes = load_result.palettes;
+        self.active_palette_name_len = 0;
+        dispatch.appendOk(out);
+    }
+
+    fn applyReloadEffectConfig(self: *App, cfg: *const AppConfig) void {
+        if (self.configured_effect_type != cfg.effect_type) {
             self.switchEffect(cfg);
         } else {
             self.animation.setSpeed(cfg.speed);
@@ -1377,11 +1394,6 @@ pub const App = struct {
             self.markGpuPaletteDirty();
         }
         self.current_palette = cfg.palette;
-
-        self.allocator.free(self.palettes);
-        self.palettes = load_result.palettes;
-        self.active_palette_name_len = 0;
-        dispatch.appendOk(out);
     }
 
     pub fn deinit(self: *App) void {

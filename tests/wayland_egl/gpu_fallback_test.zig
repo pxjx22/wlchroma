@@ -122,6 +122,7 @@ fn appFixture(effect_type: EffectType, permanent_failure: bool) App {
     var app: App = undefined;
     app.surfaces = .empty;
     app.detached_gpu = .empty;
+    app.configured_effect_type = cfg.effect_type;
     app.effect = Effect.init(&cfg);
     app.animation = wayland.animation_state.AnimationState.init(cfg.speed);
     app.egl_ctx = null;
@@ -230,6 +231,51 @@ test "App second permanent fallback preserves advanced animation phase" {
 
     try std.testing.expectApproxEqAbs(@as(f64, 0.0125), advanced_phase, 1e-12);
     try std.testing.expectEqual(advanced_phase, app.animation.phase);
+}
+
+test "App reload of same configured GPU effect preserves phase after permanent fallback" {
+    var app = appFixture(.glass_drift, true);
+    app.applyPermanentGpuFallback();
+    app.animation.advance(17);
+    const phase_before = app.animation.phase;
+    var cfg = appConfig(.glass_drift, embedded_palette);
+    cfg.speed = 2.0;
+
+    App.TestAdapter.applyReloadEffectConfig(&app, &cfg);
+
+    try std.testing.expectEqual(EffectType.glass_drift, app.configured_effect_type);
+    try std.testing.expectEqual(EffectType.colormix, std.meta.activeTag(app.effect));
+    try std.testing.expectEqual(phase_before, app.animation.phase);
+    try std.testing.expectEqual(@as(f32, 2.0), app.animation.speed);
+}
+
+test "App reload to a different configured GPU effect resets phase" {
+    var app = appFixture(.glass_drift, true);
+    app.applyPermanentGpuFallback();
+    app.animation.advance(17);
+    var cfg = appConfig(.frond_haze, embedded_palette);
+    cfg.speed = 2.0;
+
+    App.TestAdapter.applyReloadEffectConfig(&app, &cfg);
+
+    try std.testing.expectEqual(EffectType.frond_haze, app.configured_effect_type);
+    try std.testing.expectEqual(@as(f64, 0.0), app.animation.phase);
+    try std.testing.expectEqual(@as(f32, 2.0), app.animation.speed);
+}
+
+test "App reload from configured GPU effect to colormix resets phase" {
+    var app = appFixture(.glass_drift, true);
+    app.applyPermanentGpuFallback();
+    app.animation.advance(17);
+    var cfg = appConfig(.colormix, embedded_palette);
+    cfg.speed = 2.0;
+
+    App.TestAdapter.applyReloadEffectConfig(&app, &cfg);
+
+    try std.testing.expectEqual(EffectType.colormix, app.configured_effect_type);
+    try std.testing.expectEqual(EffectType.colormix, std.meta.activeTag(app.effect));
+    try std.testing.expectEqual(@as(f64, 0.0), app.animation.phase);
+    try std.testing.expectEqual(@as(f32, 2.0), app.animation.speed);
 }
 
 test "App recoverable state leaves fallback state and effect unchanged" {
