@@ -681,6 +681,13 @@ pub const App = struct {
         self.current_palette = cfg.palette;
         self.animation.reset(cfg.speed);
 
+        // A prior permanent fallback consumed the one-shot transition. A true
+        // switch can publish another GPU-only effect, so re-arm that transition
+        // and immediately convert the new renderer back to the CPU fallback.
+        if (self.gpu_pipeline_failed and self.gpu_fallback_applied and self.effect.isGpuOnly()) {
+            self.gpu_fallback_applied = false;
+        }
+
         // Deliberate zero-output epoch closure remains recoverable. Only a
         // permanent context or pipeline failure changes a GPU-only selection
         // to its CPU fallback.

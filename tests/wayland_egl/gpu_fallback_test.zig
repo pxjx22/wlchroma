@@ -259,6 +259,7 @@ test "App reload to a different configured GPU effect resets phase" {
     App.TestAdapter.applyReloadEffectConfig(&app, &cfg);
 
     try std.testing.expectEqual(EffectType.frond_haze, app.configured_effect_type);
+    try std.testing.expectEqual(EffectType.colormix, std.meta.activeTag(app.effect));
     try std.testing.expectEqual(@as(f64, 0.0), app.animation.phase);
     try std.testing.expectEqual(@as(f32, 2.0), app.animation.speed);
 }
