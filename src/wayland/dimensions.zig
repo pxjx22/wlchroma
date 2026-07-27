@@ -1,5 +1,5 @@
 const std = @import("std");
-const defaults = @import("../config/defaults.zig");
+const CellGridLayout = @import("../render/cell_grid.zig").CellGridLayout;
 
 pub const ExtentError = error{
     ZeroDimension,
@@ -16,6 +16,7 @@ pub const LayoutError = error{
     PoolSizeExceedsCInt,
     OffsetExceedsCInt,
     GridSizeOverflow,
+    InvalidShmLayout,
 };
 
 pub const Extent = struct {
@@ -74,11 +75,14 @@ pub const ShmLayout = struct {
     buffer_bytes: usize,
     total_bytes: usize,
     offsets: [2]i32,
-    grid_w: usize,
-    grid_h: usize,
-    grid_len: usize,
+    grid: CellGridLayout,
 
     pub fn init(extent: Extent) LayoutError!ShmLayout {
+        const canonical_extent = Extent.init(extent.width, extent.height) catch
+            return error.InvalidShmLayout;
+        if (!std.meta.eql(extent, canonical_extent)) {
+            return error.InvalidShmLayout;
+        }
         const stride = std.math.mul(usize, @as(usize, extent.width), 4) catch
             return error.StrideOverflow;
         if (stride > std.math.maxInt(i32)) return error.StrideExceedsCInt;
@@ -88,9 +92,7 @@ pub const ShmLayout = struct {
             return error.TotalBytesOverflow;
         if (total_bytes > std.math.maxInt(i32)) return error.PoolSizeExceedsCInt;
         if (buffer_bytes > std.math.maxInt(i32)) return error.OffsetExceedsCInt;
-        const grid_w = @max(@divFloor(@as(usize, extent.width), defaults.CELL_W), 1);
-        const grid_h = @max(@divFloor(@as(usize, extent.height), defaults.CELL_H), 1);
-        const grid_len = std.math.mul(usize, grid_w, grid_h) catch
+        const grid = CellGridLayout.initForPixels(extent.width, extent.height) catch
             return error.GridSizeOverflow;
         return .{
             .extent = extent,
@@ -98,10 +100,21 @@ pub const ShmLayout = struct {
             .buffer_bytes = buffer_bytes,
             .total_bytes = total_bytes,
             .offsets = .{ 0, @intCast(buffer_bytes) },
-            .grid_w = grid_w,
-            .grid_h = grid_h,
-            .grid_len = grid_len,
+            .grid = grid,
         };
+    }
+
+    pub fn validate(self: ShmLayout) LayoutError!void {
+        const expected = try init(self.extent);
+        if (self.stride != expected.stride or
+            self.buffer_bytes != expected.buffer_bytes or
+            self.total_bytes != expected.total_bytes or
+            self.offsets[0] != expected.offsets[0] or
+            self.offsets[1] != expected.offsets[1] or
+            !std.meta.eql(self.grid, expected.grid))
+        {
+            return error.InvalidShmLayout;
+        }
     }
 
     pub fn bufferRange(self: ShmLayout, index: u1) BufferRange {

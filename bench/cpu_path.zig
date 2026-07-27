@@ -82,7 +82,7 @@ const BenchmarkState = struct {
     fn init(allocator: std.mem.Allocator, case: Case) !BenchmarkState {
         const extent = try Extent.init(case.width, case.height);
         const layout = try ShmLayout.init(extent);
-        const cells_len = try std.math.mul(usize, layout.grid_len, case.outputs);
+        const cells_len = try std.math.mul(usize, layout.grid.len, case.outputs);
         const pixels_len = try std.math.mul(usize, layout.total_bytes, case.outputs);
 
         const cells = try allocator.alloc(Rgb, cells_len);
@@ -108,8 +108,8 @@ const BenchmarkState = struct {
     }
 
     fn cellSlice(self: *BenchmarkState, output: usize) []Rgb {
-        const start = output * self.layout.grid_len;
-        return self.cells[start..][0..self.layout.grid_len];
+        const start = output * self.layout.grid.len;
+        return self.cells[start..][0..self.layout.grid.len];
     }
 
     fn pixelSlice(self: *BenchmarkState, output: usize, index: u1) []u8 {
@@ -122,10 +122,9 @@ const BenchmarkState = struct {
         for (0..self.outputs) |output| {
             self.stable_renderer.renderGrid(
                 fixed_animation_time,
-                self.layout.grid_w,
-                self.layout.grid_h,
+                self.layout.grid,
                 self.cellSlice(output),
-            );
+            ) catch unreachable;
         }
     }
 
@@ -137,21 +136,18 @@ const BenchmarkState = struct {
                     for (0..self.outputs) |output| {
                         self.stable_renderer.renderGrid(
                             fixed_animation_time,
-                            self.layout.grid_w,
-                            self.layout.grid_h,
+                            self.layout.grid,
                             self.cellSlice(output),
-                        );
+                        ) catch unreachable;
                     }
                 },
                 .expand => {
                     for (0..self.outputs) |output| {
                         src.framebuffer.expandCells(
                             self.cellSlice(output),
-                            self.layout.grid_w,
-                            self.layout.grid_h,
                             self.pixelSlice(output, buffer_index),
-                            self.layout.extent,
-                        );
+                            self.layout,
+                        ) catch unreachable;
                     }
                 },
                 .combined_stable => {
@@ -159,36 +155,30 @@ const BenchmarkState = struct {
                         const cells = self.cellSlice(output);
                         self.stable_renderer.renderGrid(
                             fixed_animation_time,
-                            self.layout.grid_w,
-                            self.layout.grid_h,
+                            self.layout.grid,
                             cells,
-                        );
+                        ) catch unreachable;
                         src.framebuffer.expandCells(
                             cells,
-                            self.layout.grid_w,
-                            self.layout.grid_h,
                             self.pixelSlice(output, buffer_index),
-                            self.layout.extent,
-                        );
+                            self.layout,
+                        ) catch unreachable;
                     }
                 },
                 .combined_changing => {
-                    var renderer = makeRenderer(changing_colors[frame % changing_colors.len]);
+                    const renderer = makeRenderer(changing_colors[frame % changing_colors.len]);
                     for (0..self.outputs) |output| {
                         const cells = self.cellSlice(output);
                         renderer.renderGrid(
                             fixed_animation_time,
-                            self.layout.grid_w,
-                            self.layout.grid_h,
+                            self.layout.grid,
                             cells,
-                        );
+                        ) catch unreachable;
                         src.framebuffer.expandCells(
                             cells,
-                            self.layout.grid_w,
-                            self.layout.grid_h,
                             self.pixelSlice(output, buffer_index),
-                            self.layout.extent,
-                        );
+                            self.layout,
+                        ) catch unreachable;
                     }
                 },
             }
@@ -251,9 +241,9 @@ fn logicalGridChecksum(state: *BenchmarkState) u64 {
     var checksum = fnv_offset_basis;
     for (0..state.outputs) |output| {
         const cells = state.cellSlice(output);
-        for (0..state.layout.grid_h) |y| {
-            for (0..state.layout.grid_w) |x| {
-                const color = cells[x * state.layout.grid_h + y];
+        for (0..state.layout.grid.height) |y| {
+            for (0..state.layout.grid.width) |x| {
+                const color = cells[x * state.layout.grid.height + y];
                 checksumByte(&checksum, color.r);
                 checksumByte(&checksum, color.g);
                 checksumByte(&checksum, color.b);

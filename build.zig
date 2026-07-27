@@ -251,6 +251,19 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_dimensions_tests.step);
     test_step.dependOn(&run_dimensions_tests.step);
 
+    const shm_pool_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/shm_pool_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shm_pool_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const shm_pool_tests = b.addTest(.{
+        .root_module = shm_pool_test_mod,
+    });
+    const run_shm_pool_tests = b.addRunArtifact(shm_pool_tests);
+    phase2_test_step.dependOn(&run_shm_pool_tests.step);
+    test_step.dependOn(&run_shm_pool_tests.step);
+
     const gpu_epoch_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/gpu_epoch_test.zig"),
         .target = target,
@@ -389,6 +402,30 @@ pub fn build(b: *std.Build) void {
     });
     const run_cpu_standin_tests = b.addRunArtifact(cpu_standin_tests);
     test_step.dependOn(&run_cpu_standin_tests.step);
+
+    const cell_grid_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/cell_grid_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cell_grid_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const cell_grid_tests = b.addTest(.{
+        .root_module = cell_grid_test_mod,
+    });
+    const run_cell_grid_tests = b.addRunArtifact(cell_grid_tests);
+    test_step.dependOn(&run_cell_grid_tests.step);
+
+    const framebuffer_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/framebuffer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    framebuffer_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const framebuffer_tests = b.addTest(.{
+        .root_module = framebuffer_test_mod,
+    });
+    const run_framebuffer_tests = b.addRunArtifact(framebuffer_tests);
+    test_step.dependOn(&run_framebuffer_tests.step);
 
     // Color-fade pure-helper tests. color_fade.zig reaches into ../config/, so
     // the module is rooted at src/ via the same test_exports.zig shim.

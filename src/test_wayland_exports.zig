@@ -6,6 +6,7 @@ pub const effect = @import("render/effect.zig");
 pub const config = @import("config/config.zig");
 pub const defaults = @import("config/defaults.zig");
 pub const dimensions = @import("wayland/dimensions.zig");
+pub const shm_pool = @import("wayland/shm_pool.zig");
 pub const egl_context = @import("render/egl_context.zig");
 pub const gpu_upload_state = @import("render/gpu_upload_state.zig");
 pub const gpu_fallback = @import("render/gpu_fallback.zig");

@@ -62,8 +62,6 @@ pub const SurfaceState = struct {
     animation: *const AnimationState,
     cpu_standin: CpuStandin,
     cell_grid: []defaults.Rgb,
-    grid_w: usize,
-    grid_h: usize,
     extent: ?Extent,
     configured: bool,
     display: *c.wl_display,
@@ -138,8 +136,6 @@ pub const SurfaceState = struct {
             .animation = animation,
             .cpu_standin = .{},
             .cell_grid = &.{},
-            .grid_w = 0,
-            .grid_h = 0,
             .extent = initial_extent,
             .configured = false,
             .display = display,
@@ -236,12 +232,12 @@ pub const SurfaceState = struct {
         }
 
         // SHM/CPU fallback path
-        var pool = &(self.shm_pool orelse return);
+        const pool = if (self.shm_pool) |*value| value else return;
         const idx = pool.acquireBuffer() orelse return;
-
-        const cpu_effect = self.cpu_standin.resolve(self.effect);
-        cpu_effect.renderGrid(self.animation.time(), self.grid_w, self.grid_h, self.cell_grid);
-        framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), extent);
+        self.renderCpuBuffer(pool, idx) catch |err| {
+            std.debug.print("SHM render failed: {}\n", .{err});
+            return;
+        };
 
         c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
         c.wl_surface_damage_buffer(wl_surface, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
@@ -255,6 +251,22 @@ pub const SurfaceState = struct {
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
 
         c.wl_surface_commit(wl_surface);
+    }
+
+    fn renderCpuBuffer(self: *SurfaceState, pool: *ShmPool, idx: u1) !void {
+        errdefer pool.releaseBuffer(idx);
+
+        const cpu_effect = self.cpu_standin.resolve(self.effect);
+        try cpu_effect.renderGrid(
+            self.animation.time(),
+            pool.layout.grid,
+            self.cell_grid,
+        );
+        try framebuffer.expandCells(
+            self.cell_grid,
+            pool.pixelSlice(idx),
+            pool.layout,
+        );
     }
 
     pub fn detachGpu(self: *SurfaceState) DetachedGpu {
@@ -390,20 +402,22 @@ pub const SurfaceState = struct {
         const layout = try ShmLayout.init(extent);
         const wl_surface = self.layer_surface.wl_surface orelse return error.MissingWlSurface;
 
-        const new_grid = try self.allocator.alloc(defaults.Rgb, layout.grid_len);
+        const new_grid = try self.allocator.alloc(defaults.Rgb, layout.grid.len);
         errdefer self.allocator.free(new_grid);
         var new_pool = try ShmPool.init(self.shm, layout);
         errdefer new_pool.deinit();
 
         const cpu_effect = self.cpu_standin.resolve(self.effect);
-        cpu_effect.renderGrid(self.animation.time(), layout.grid_w, layout.grid_h, new_grid);
-        const first = new_pool.acquireBuffer() orelse return error.NoFreeShmBuffer;
-        framebuffer.expandCells(
+        try cpu_effect.renderGrid(
+            self.animation.time(),
+            layout.grid,
             new_grid,
-            layout.grid_w,
-            layout.grid_h,
+        );
+        const first = new_pool.acquireBuffer() orelse return error.NoFreeShmBuffer;
+        try framebuffer.expandCells(
+            new_grid,
             new_pool.pixelSlice(first),
-            extent,
+            layout,
         );
 
         if (self.frame_callback) |old_callback| {
@@ -415,8 +429,6 @@ pub const SurfaceState = struct {
 
         self.shm_pool = new_pool;
         self.cell_grid = new_grid;
-        self.grid_w = layout.grid_w;
-        self.grid_h = layout.grid_h;
         self.buf_ctx[0] = .{ .pool_busy = &self.shm_pool.?.busy[0], .surface = self };
         self.buf_ctx[1] = .{ .pool_busy = &self.shm_pool.?.busy[1], .surface = self };
         self.shm_pool.?.attachListeners(
@@ -435,7 +447,7 @@ pub const SurfaceState = struct {
         }
         c.wl_surface_commit(wl_surface);
         self.configured = true;
-        std.debug.print("configure: {}x{} grid={}x{}\n", .{ extent.width, extent.height, layout.grid_w, layout.grid_h });
+        std.debug.print("configure: {}x{} grid={}x{}\n", .{ extent.width, extent.height, layout.grid.width, layout.grid.height });
     }
 };
 

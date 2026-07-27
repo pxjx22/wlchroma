@@ -14,6 +14,7 @@ pub const ShmPool = struct {
     fd: posix.fd_t,
 
     pub fn init(shm: *c.wl_shm, layout: ShmLayout) !ShmPool {
+        try layout.validate();
         var self = try initResources(shm, layout);
         // deinit handles all cleanup: buffers (null-checked), pool, mmap, fd.
         // Partial failure (e.g. buffer[1] create fails after buffer[0] succeeds)
@@ -112,6 +113,10 @@ pub const ShmPool = struct {
             return 1;
         }
         return null;
+    }
+
+    pub fn releaseBuffer(self: *ShmPool, idx: u1) void {
+        self.busy[idx] = false;
     }
 
     pub fn pixelSlice(self: *ShmPool, idx: u1) []u8 {

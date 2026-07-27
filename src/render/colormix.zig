@@ -2,10 +2,14 @@ const std = @import("std");
 const defaults = @import("../config/defaults.zig");
 const palette_mod = @import("palette.zig");
 const ColormixShader = @import("colormix_shader.zig").ColormixShader;
+const cell_grid = @import("cell_grid.zig");
+const CellGridLayout = cell_grid.CellGridLayout;
 
 pub const Rgb = defaults.Rgb;
 const Cell = defaults.Cell;
 const PALETTE_LEN: usize = 12;
+
+pub const RenderGridError = cell_grid.GridError || error{OutputLengthMismatch};
 
 pub const ColormixRenderer = struct {
     pattern_cos_mod: f32,
@@ -27,13 +31,27 @@ pub const ColormixRenderer = struct {
         };
     }
 
-    pub fn renderGrid(self: *const ColormixRenderer, time: f32, grid_w: usize, grid_h: usize, out: []Rgb) void {
-        for (0..grid_w) |x| {
-            for (0..grid_h) |y| {
+    pub fn renderGrid(
+        self: *const ColormixRenderer,
+        time: f32,
+        grid: CellGridLayout,
+        out: []Rgb,
+    ) RenderGridError!void {
+        try grid.validate();
+        const max_doubled_dimension: usize = @intCast(std.math.maxInt(i32) / 2);
+        if (grid.width > max_doubled_dimension or
+            grid.height > max_doubled_dimension)
+        {
+            return error.GridSizeOverflow;
+        }
+        if (out.len != grid.len) return error.OutputLengthMismatch;
+
+        for (0..grid.width) |x| {
+            for (0..grid.height) |y| {
                 const xi: i32 = @intCast(x);
                 const yi: i32 = @intCast(y);
-                const wi: i32 = @intCast(grid_w);
-                const hi: i32 = @intCast(grid_h);
+                const wi: i32 = @intCast(grid.width);
+                const hi: i32 = @intCast(grid.height);
 
                 var uvx = @as(f32, @floatFromInt(xi * 2 - wi)) / @as(f32, @floatFromInt(hi * 2));
                 var uvy = @as(f32, @floatFromInt(yi * 2 - hi)) / @as(f32, @floatFromInt(hi));
@@ -59,7 +77,7 @@ pub const ColormixRenderer = struct {
                 const cell = self.palette[palette_index];
                 // Column-major layout: x is the outer index, y is the inner.
                 // This matches the iteration order in framebuffer.expandCells.
-                out[x * grid_h + y] = palette_mod.blend(cell.fg, cell.bg, cell.alpha);
+                out[x * grid.height + y] = palette_mod.blend(cell.fg, cell.bg, cell.alpha);
             }
         }
     }

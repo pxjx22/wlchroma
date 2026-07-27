@@ -13,6 +13,9 @@ const DitherOrbRenderer = @import("dither_orb.zig").DitherOrbRenderer;
 const SignalMatrixRenderer = @import("signal_matrix.zig").SignalMatrixRenderer;
 const FractLatticeRenderer = @import("fract_lattice.zig").FractLatticeRenderer;
 const Rgb = @import("../config/defaults.zig").Rgb;
+const CellGridLayout = @import("cell_grid.zig").CellGridLayout;
+
+pub const RenderGridError = @import("colormix.zig").RenderGridError || error{NoCpuRenderer};
 
 /// Central effect abstraction. App owns one Effect value; SurfaceState holds
 /// a pointer to it. The tagged union dispatches renderer operations to the
@@ -86,22 +89,28 @@ pub const Effect = union(EffectType) {
         return true;
     }
 
-    /// CPU render grid (SHM fallback path). Only implemented for colormix.
-    /// Returns without doing anything for GPU-only effects.
-    pub fn renderGrid(self: *const Effect, animation_time: f32, grid_w: usize, grid_h: usize, out: []Rgb) void {
-        switch (self.*) {
-            .colormix => |*r| r.renderGrid(animation_time, grid_w, grid_h, out),
-            .glass_drift => {}, // GPU-only: no CPU path
-            .frond_haze => {},
-            .lumen_tunnel => {},
-            .velvet_mesh => {},
-            .starfield_fog => {},
-            .gyro_echo => {},
-            .hex_floret => {},
-            .dither_orb => {},
-            .signal_matrix => {},
-            .fract_lattice => {},
-        }
+    /// CPU render grid (SHM fallback path). Only implemented for colormix;
+    /// GPU-only effects report that no CPU renderer exists.
+    pub fn renderGrid(
+        self: *const Effect,
+        animation_time: f32,
+        grid: CellGridLayout,
+        out: []Rgb,
+    ) RenderGridError!void {
+        return switch (self.*) {
+            .colormix => |*r| r.renderGrid(animation_time, grid, out),
+            .glass_drift,
+            .frond_haze,
+            .lumen_tunnel,
+            .velvet_mesh,
+            .starfield_fog,
+            .gyro_echo,
+            .hex_floret,
+            .dither_orb,
+            .signal_matrix,
+            .fract_lattice,
+            => error.NoCpuRenderer,
+        };
     }
 
     /// Colormix palette data for ColormixShader.uploadPalette. Null for non-colormix effects.

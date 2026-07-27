@@ -5,6 +5,7 @@ const config_mod = src.config;
 const EffectType = config_mod.EffectType;
 const Rgb = src.defaults.Rgb;
 const AnimationState = src.animation_state.AnimationState;
+const CellGridLayout = src.cell_grid.CellGridLayout;
 
 fn configFor(effect_type: EffectType) config_mod.AppConfig {
     var cfg = config_mod.defaultConfig();
@@ -37,6 +38,25 @@ test "updatePalette applies new colors on every effect arm" {
             try std.testing.expectEqual(new_palette[0], colors[0]);
             try std.testing.expectEqual(new_palette[1], colors[1]);
             try std.testing.expectEqual(new_palette[2], colors[2]);
+        }
+    }
+}
+
+test "every GPU-only effect reports no CPU renderer without writing" {
+    const grid = CellGridLayout{ .width = 1, .height = 1, .len = 1 };
+    const sentinel = Rgb{ .r = 0xaa, .g = 0xbb, .b = 0xcc };
+    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
+        const effect_type: EffectType = @enumFromInt(field.value);
+        if (effect_type != .colormix) {
+            const cfg = configFor(effect_type);
+            const eff = Effect.init(&cfg);
+            var output = [_]Rgb{sentinel};
+
+            try std.testing.expectError(
+                error.NoCpuRenderer,
+                eff.renderGrid(1.0, grid, &output),
+            );
+            try std.testing.expectEqual(sentinel, output[0]);
         }
     }
 }
