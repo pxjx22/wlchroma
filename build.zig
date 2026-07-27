@@ -389,4 +389,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_color_fade_tests = b.addRunArtifact(color_fade_tests);
     test_step.dependOn(&run_color_fade_tests.step);
+
+    // Animation-state tests exercise only the pure bounded phase timeline.
+    const animation_state_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/animation_state_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    animation_state_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const animation_state_tests = b.addTest(.{
+        .root_module = animation_state_test_mod,
+    });
+    const run_animation_state_tests = b.addRunArtifact(animation_state_tests);
+    test_step.dependOn(&run_animation_state_tests.step);
 }
