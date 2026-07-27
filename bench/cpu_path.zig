@@ -243,7 +243,7 @@ fn logicalGridChecksum(state: *BenchmarkState) u64 {
         const cells = state.cellSlice(output);
         for (0..state.layout.grid.height) |y| {
             for (0..state.layout.grid.width) |x| {
-                const color = cells[x * state.layout.grid.height + y];
+                const color = cells[y * state.layout.grid.width + x];
                 checksumByte(&checksum, color.r);
                 checksumByte(&checksum, color.g);
                 checksumByte(&checksum, color.b);

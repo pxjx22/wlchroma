@@ -9,7 +9,7 @@ pub const ExpandError = dimensions.LayoutError || cell_grid.GridError || error{
     PixelLengthMismatch,
 };
 
-/// Expand a validated cell grid (indexed [x * grid.height + y])
+/// Expand a validated row-major cell grid (indexed [y * grid.width + x])
 /// into pixel_buf as XRGB8888 (4 bytes/pixel, little-endian: [B, G, R, 0x00]).
 ///
 /// Iterates over cells and fills their pixel rectangles directly, avoiding
@@ -39,8 +39,7 @@ pub fn expandCells(
             if (px_start >= pw) break;
             const px_limit = @min(px_end, pw);
 
-            // Column-major: x is outer index, y is inner (matches colormix.zig renderGrid).
-            const color = cells[cx * layout.grid.height + cy];
+            const color = cells[cy * layout.grid.width + cx];
             const pixel: [4]u8 = .{ color.b, color.g, color.r, 0x00 };
 
             for (py_start..py_limit) |py| {

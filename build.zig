@@ -427,6 +427,18 @@ pub fn build(b: *std.Build) void {
     const run_framebuffer_tests = b.addRunArtifact(framebuffer_tests);
     test_step.dependOn(&run_framebuffer_tests.step);
 
+    const colormix_render_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/colormix_render_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    colormix_render_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const colormix_render_tests = b.addTest(.{
+        .root_module = colormix_render_test_mod,
+    });
+    const run_colormix_render_tests = b.addRunArtifact(colormix_render_tests);
+    test_step.dependOn(&run_colormix_render_tests.step);
+
     // Color-fade pure-helper tests. color_fade.zig reaches into ../config/, so
     // the module is rooted at src/ via the same test_exports.zig shim.
     const color_fade_test_mod = b.createModule(.{

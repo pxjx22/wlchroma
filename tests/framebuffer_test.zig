@@ -11,6 +11,42 @@ fn layout2x2() !ShmLayout {
     return ShmLayout.init(try src.dimensions.Extent.init(20, 32));
 }
 
+fn expectPixel(
+    pixels: []const u8,
+    layout: ShmLayout,
+    x: usize,
+    y: usize,
+    color: Rgb,
+) !void {
+    const base = (y * @as(usize, layout.extent.width) + x) * 4;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ color.b, color.g, color.r, 0x00 },
+        pixels[base..][0..4],
+    );
+}
+
+test "framebuffer expands row-major cells into matching quadrants" {
+    const layout = try layout2x2();
+    const red = Rgb{ .r = 0xff, .g = 0, .b = 0 };
+    const green = Rgb{ .r = 0, .g = 0xff, .b = 0 };
+    const blue = Rgb{ .r = 0, .g = 0, .b = 0xff };
+    const white = Rgb{ .r = 0xff, .g = 0xff, .b = 0xff };
+    const cells = [_]Rgb{
+        red,  green,
+        blue, white,
+    };
+    const pixels = try std.testing.allocator.alloc(u8, layout.buffer_bytes);
+    defer std.testing.allocator.free(pixels);
+
+    try src.framebuffer.expandCells(&cells, pixels, layout);
+
+    try expectPixel(pixels, layout, 0, 0, red);
+    try expectPixel(pixels, layout, 10, 0, green);
+    try expectPixel(pixels, layout, 0, 16, blue);
+    try expectPixel(pixels, layout, 10, 16, white);
+}
+
 test "framebuffer rejects short and oversized cell slices before writing" {
     const layout = try layout2x2();
     const pixels = try std.testing.allocator.alloc(u8, layout.buffer_bytes);

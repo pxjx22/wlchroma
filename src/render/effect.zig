@@ -169,13 +169,8 @@ pub const Effect = union(EffectType) {
     /// For GPU effects: updates the [3]Rgb palette field.
     /// Mark the App-owned palette upload state dirty after calling this.
     pub fn updatePalette(self: *Effect, colors: [3]Rgb) void {
-        const palette_mod = @import("palette.zig");
-        const ColormixShader = @import("colormix_shader.zig").ColormixShader;
         switch (self.*) {
-            .colormix => |*r| {
-                r.palette = palette_mod.buildPalette(colors[0], colors[1], colors[2]);
-                r.palette_data = ColormixShader.buildPaletteData(&r.palette);
-            },
+            .colormix => |*r| r.rebuildPalette(colors),
             .glass_drift => |*r| r.palette = colors,
             .frond_haze => |*r| r.palette = colors,
             .lumen_tunnel => |*r| r.palette = colors,
