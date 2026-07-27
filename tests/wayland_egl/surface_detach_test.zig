@@ -83,6 +83,11 @@ test "program global upload state is app owned" {
     try std.testing.expect(!@hasField(SurfaceState, "needs_static_uniforms"));
 }
 
+test "surface owns change-driven CPU stand-in state" {
+    try std.testing.expect(@hasField(SurfaceState, "cpu_standin"));
+    try std.testing.expect(!@hasField(SurfaceState, "shm_effect"));
+}
+
 test "render tick receives mutable shader and app upload state" {
     const info = @typeInfo(@TypeOf(SurfaceState.renderTick)).@"fn";
     try std.testing.expectEqual(@as(usize, 4), info.params.len);

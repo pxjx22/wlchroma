@@ -376,6 +376,20 @@ pub fn build(b: *std.Build) void {
     const run_effect_tests = b.addRunArtifact(effect_tests);
     test_step.dependOn(&run_effect_tests.step);
 
+    // CPU stand-in resolution is pure renderer state: stable GPU-only
+    // sources must reuse one colormix fallback until explicitly invalidated.
+    const cpu_standin_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/cpu_standin_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cpu_standin_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const cpu_standin_tests = b.addTest(.{
+        .root_module = cpu_standin_test_mod,
+    });
+    const run_cpu_standin_tests = b.addRunArtifact(cpu_standin_tests);
+    test_step.dependOn(&run_cpu_standin_tests.step);
+
     // Color-fade pure-helper tests. color_fade.zig reaches into ../config/, so
     // the module is rooted at src/ via the same test_exports.zig shim.
     const color_fade_test_mod = b.createModule(.{

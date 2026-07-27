@@ -4,9 +4,9 @@ const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
 const Effect = @import("../render/effect.zig").Effect;
 const AnimationState = @import("../render/animation_state.zig").AnimationState;
+const CpuStandin = @import("../render/cpu_standin.zig").CpuStandin;
 const EffectShader = @import("../render/effect_shader.zig").EffectShader;
 const GpuUploadState = @import("../render/gpu_upload_state.zig").GpuUploadState;
-const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
 const framebuffer = @import("../render/framebuffer.zig");
 const defaults = @import("../config/defaults.zig");
 const OutputInfo = @import("output.zig").OutputInfo;
@@ -60,7 +60,7 @@ pub const SurfaceState = struct {
     /// Borrowed from the App storage finalized before setup; every surface
     /// is destroyed before App teardown invalidates this pointer.
     animation: *const AnimationState,
-    shm_effect: ?Effect,
+    cpu_standin: CpuStandin,
     cell_grid: []defaults.Rgb,
     grid_w: usize,
     grid_h: usize,
@@ -136,7 +136,7 @@ pub const SurfaceState = struct {
             .shm = shm,
             .effect = effect,
             .animation = animation,
-            .shm_effect = null,
+            .cpu_standin = .{},
             .cell_grid = &.{},
             .grid_w = 0,
             .grid_h = 0,
@@ -239,7 +239,7 @@ pub const SurfaceState = struct {
         var pool = &(self.shm_pool orelse return);
         const idx = pool.acquireBuffer() orelse return;
 
-        const cpu_effect = self.cpuEffect();
+        const cpu_effect = self.cpu_standin.resolve(self.effect);
         cpu_effect.renderGrid(self.animation.time(), self.grid_w, self.grid_h, self.cell_grid);
         framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), extent);
 
@@ -310,7 +310,7 @@ pub const SurfaceState = struct {
             self.cell_grid = &.{};
         }
         self.configured = false;
-        self.shm_effect = null;
+        self.cpu_standin.invalidate();
     }
 
     pub fn deinit(self: *SurfaceState) void {
@@ -386,28 +386,6 @@ pub const SurfaceState = struct {
         }
     };
 
-    fn cpuEffect(self: *SurfaceState) *Effect {
-        if (self.effect.isGpuOnly()) {
-            self.ensureShmFallbackEffect();
-            return &(self.shm_effect.?);
-        }
-        self.shm_effect = null;
-        return self.effect;
-    }
-
-    fn ensureShmFallbackEffect(self: *SurfaceState) void {
-        const colors = self.effect.gpuPalette() orelse return;
-        if (self.shm_effect == null) {
-            self.shm_effect = Effect{ .colormix = ColormixRenderer.init(
-                colors[0],
-                colors[1],
-                colors[2],
-            ) };
-        } else {
-            self.shm_effect.?.updatePalette(colors);
-        }
-    }
-
     fn configureShmFallback(self: *SurfaceState, extent: Extent) !void {
         const layout = try ShmLayout.init(extent);
         const wl_surface = self.layer_surface.wl_surface orelse return error.MissingWlSurface;
@@ -417,7 +395,8 @@ pub const SurfaceState = struct {
         var new_pool = try ShmPool.init(self.shm, layout);
         errdefer new_pool.deinit();
 
-        self.cpuEffect().renderGrid(self.animation.time(), layout.grid_w, layout.grid_h, new_grid);
+        const cpu_effect = self.cpu_standin.resolve(self.effect);
+        cpu_effect.renderGrid(self.animation.time(), layout.grid_w, layout.grid_h, new_grid);
         const first = new_pool.acquireBuffer() orelse return error.NoFreeShmBuffer;
         framebuffer.expandCells(
             new_grid,

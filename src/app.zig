@@ -555,7 +555,7 @@ pub const App = struct {
         }
 
         pub fn invalidateCpuStandins(self: *@This()) void {
-            for (self.app.surfaces.items) |surface| surface.shm_effect = null;
+            for (self.app.surfaces.items) |surface| surface.cpu_standin.invalidate();
         }
 
         pub fn configureCpuSurfaces(self: *@This()) void {
@@ -694,9 +694,9 @@ pub const App = struct {
         self.applyPermanentGpuFallback();
 
         // Per-surface CPU stand-ins were built from the old effect; drop them
-        // so cpuEffect() rebuilds lazily from the new one.
+        // so resolve() rebuilds lazily from the new one.
         for (self.surfaces.items) |s| {
-            s.shm_effect = null;
+            s.cpu_standin.invalidate();
         }
 
         // Rebuild the shader for the new effect while EGL surfaces exist; at

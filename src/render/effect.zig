@@ -34,11 +34,7 @@ pub const Effect = union(EffectType) {
     /// applying the GPU-only fallback before calling Effect.init.
     pub fn init(config: *const AppConfig) Effect {
         return switch (config.effect_type) {
-            .colormix => Effect{ .colormix = ColormixRenderer.init(
-                config.palette[0],
-                config.palette[1],
-                config.palette[2],
-            ) },
+            .colormix => initColormix(config.palette),
             .glass_drift => Effect{ .glass_drift = GlassDriftRenderer.init(config.palette) },
             .frond_haze => Effect{ .frond_haze = FrondHazeRenderer.init(config.palette) },
             .lumen_tunnel => Effect{ .lumen_tunnel = LumenTunnelRenderer.init(config.palette) },
@@ -50,6 +46,16 @@ pub const Effect = union(EffectType) {
             .signal_matrix => Effect{ .signal_matrix = SignalMatrixRenderer.init(config.palette) },
             .fract_lattice => Effect{ .fract_lattice = FractLatticeRenderer.init(config.palette) },
         };
+    }
+
+    /// Construct the renderer-only CPU effect used by SHM stand-ins and
+    /// permanent fallback conversion.
+    pub fn initColormix(colors: [3]Rgb) Effect {
+        return .{ .colormix = ColormixRenderer.init(
+            colors[0],
+            colors[1],
+            colors[2],
+        ) };
     }
 
     /// True for effects that have no CPU/SHM rendering path.
@@ -76,11 +82,7 @@ pub const Effect = union(EffectType) {
     pub fn fallbackToColormix(self: *Effect, colors: [3]Rgb) bool {
         if (!self.isGpuOnly()) return false;
 
-        self.* = .{ .colormix = ColormixRenderer.init(
-            colors[0],
-            colors[1],
-            colors[2],
-        ) };
+        self.* = initColormix(colors);
         return true;
     }
 
