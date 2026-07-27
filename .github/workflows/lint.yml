@@ -1,0 +1,67 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Check formatting
+        run: zig fmt --check src/ tests/ build.zig
+
+  custom-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commit message format
+        run: |
+          set -euo pipefail
+          PATTERN='^(feat|fix|test|docs|refactor|perf)\((ipc|ctl|config|renderer|build|repo|app|security)\): .+'
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+              DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+              BASE=$(git merge-base "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null || echo "")
+              if [ -n "$BASE" ]; then
+                RANGE="$BASE..HEAD"
+              else
+                RANGE="HEAD"
+              fi
+            else
+              RANGE="${{ github.event.before }}..${{ github.event.after }}"
+            fi
+          fi
+          BAD=$(git log --no-merges --format="%s" $RANGE | grep -vE "$PATTERN" || true)
+          if [ -n "$BAD" ]; then
+            echo "Commits with invalid format:"
+            echo "$BAD"
+            echo ""
+            echo "Expected: <type>(<scope>): <description>"
+            echo "  types:  feat, fix, test, docs, refactor, perf"
+            echo "  scopes: ipc, ctl, config, renderer, build, repo, app, security"
+            exit 1
+          fi
+          echo "All commit messages match format."
+
+      - name: TOML validity
+        run: python3 -c "import tomllib; tomllib.load(open('config.toml.example','rb'))"
+
+      - name: Build artifacts check
+        run: |
+          ARTIFACTS=$(git ls-files zig-out/ .zig-cache/ || true)
+          if [ -n "$ARTIFACTS" ]; then
+            echo "Build artifacts committed:"
+            echo "$ARTIFACTS"
+            exit 1
+          fi
+          echo "No build artifacts committed."

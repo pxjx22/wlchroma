@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libegl1-mesa-dev libgles2-mesa-dev libwayland-bin libwayland-dev
+
+      - name: Build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Generate release notes
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep '^v' | grep -v "^${{ github.ref_name }}$" | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            git log --no-merges --pretty=format:'- %s' "$PREV_TAG..${{ github.ref_name }}" > /tmp/release_notes.txt
+          else
+            git log --no-merges --pretty=format:'- %s' "${{ github.ref_name }}" > /tmp/release_notes.txt
+          fi
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release_notes.txt
+          files: |
+            zig-out/bin/wlchroma
+            zig-out/bin/wlchroma-ctl

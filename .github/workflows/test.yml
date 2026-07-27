@@ -1,13 +1,12 @@
-name: CI
+name: Test
 
 on:
   push:
   pull_request:
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -21,5 +20,5 @@ jobs:
       - name: Build
         run: zig build
 
-      - name: Config parser tests
-        run: zig test src/config/config.zig
+      - name: Full test suite
+        run: zig build test
