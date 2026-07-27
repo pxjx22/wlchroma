@@ -8,6 +8,7 @@ const CYCLE_LENGTH: f64 = PHASE_LIMIT * 2.0;
 // Keep accumulation at the mathematical 0.01; widening the f32 config
 // constant would introduce up to about 5.59e-10 error at speed 2.5.
 const time_scale: f64 = 0.01;
+const fold_time_scale: f128 = 0.01;
 comptime {
     std.debug.assert(@as(f32, @floatCast(time_scale)) == defaults.TIME_SCALE);
 }
@@ -86,25 +87,27 @@ pub const AnimationState = struct {
                 self.direction = .forward;
             },
         }
-        self.fold(overshoot);
+        self.fold(expirations, distance);
         self.assertValid();
     }
 
-    fn fold(self: *AnimationState, step: f64) void {
-        const position = switch (self.direction) {
+    fn fold(self: *AnimationState, expirations: u64, first_distance: f64) void {
+        const step: f128 = fold_time_scale * @as(f128, self.speed) *
+            @as(f128, @floatFromInt(expirations)) - @as(f128, first_distance);
+        const position: f128 = switch (self.direction) {
             .forward => self.phase,
             .backward => CYCLE_LENGTH - self.phase,
         };
-        const folded = @mod(position + step, CYCLE_LENGTH);
+        const folded = @mod(position + step, @as(f128, CYCLE_LENGTH));
 
-        if (folded < PHASE_LIMIT) {
-            self.phase = folded;
+        if (folded < @as(f128, PHASE_LIMIT)) {
+            self.phase = @floatCast(folded);
             self.direction = .forward;
-        } else if (folded == PHASE_LIMIT) {
+        } else if (folded == @as(f128, PHASE_LIMIT)) {
             self.phase = PHASE_LIMIT;
             self.direction = .backward;
         } else {
-            self.phase = CYCLE_LENGTH - folded;
+            self.phase = @floatCast(@as(f128, CYCLE_LENGTH) - folded);
             self.direction = .backward;
         }
     }

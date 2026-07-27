@@ -130,7 +130,7 @@ test "one advance can cross multiple endpoints" {
     try std.testing.expectEqual(Direction.forward, animation.direction);
 }
 
-test "maximum expiration count remains bounded" {
+test "maximum expiration count preserves exact folded phase" {
     var animation = AnimationState{
         .phase = PHASE_LIMIT - 7.0,
         .speed = 2.5,
@@ -139,6 +139,8 @@ test "maximum expiration count remains bounded" {
 
     animation.advance(std.math.maxInt(u64));
 
+    try std.testing.expectApproxEqAbs(@as(f64, 9_837.375), animation.phase, 1e-12);
+    try std.testing.expectEqual(Direction.forward, animation.direction);
     try std.testing.expect(std.math.isFinite(animation.phase));
     try std.testing.expect(animation.phase >= 0.0);
     try std.testing.expect(animation.phase <= PHASE_LIMIT);
