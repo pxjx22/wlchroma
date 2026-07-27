@@ -8,51 +8,26 @@ const Cell = defaults.Cell;
 const PALETTE_LEN: usize = 12;
 
 pub const ColormixRenderer = struct {
-    frames: u64,
     pattern_cos_mod: f32,
     pattern_sin_mod: f32,
     palette: [12]Cell,
-    last_advance_ms: u32,
-    frame_advance_ms: u32,
-    speed: f32,
     /// Pre-blended palette colors for GPU shader: 12 vec3s as 36 floats.
     /// Computed once at init from the palette; shared across all outputs.
     palette_data: [36]f32,
 
-    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb, frame_advance_ms: u32, speed: f32) ColormixRenderer {
+    pub fn init(col1: Rgb, col2: Rgb, col3: Rgb) ColormixRenderer {
         var prng = std.Random.DefaultPrng.init(defaults.SEED);
         const random = prng.random();
         const pal = palette_mod.buildPalette(col1, col2, col3);
         return .{
-            .frames = 0,
             .pattern_cos_mod = random.float(f32) * std.math.pi * 2.0,
             .pattern_sin_mod = random.float(f32) * std.math.pi * 2.0,
             .palette = pal,
-            .last_advance_ms = 0,
-            .frame_advance_ms = frame_advance_ms,
-            .speed = speed,
             .palette_data = ColormixShader.buildPaletteData(&pal),
         };
     }
 
-    /// Advance the frame counter at most once per frame interval (~15fps).
-    /// The gate threshold (FRAME_ADVANCE_MS = 60ms) is intentionally below
-    /// the timer period (FRAME_INTERVAL_NS ~ 66.67ms) to absorb up to ~10%
-    /// scheduler jitter without skipping frames, while still preventing
-    /// double-advance within a single timer period.
-    /// Multiple outputs calling this with the same (or close) timestamp
-    /// will only increment frames once, keeping all outputs in sync.
-    pub fn maybeAdvance(self: *ColormixRenderer, time_ms: u32) void {
-        const delta = time_ms -% self.last_advance_ms;
-        if (self.last_advance_ms == 0 or delta >= self.frame_advance_ms) {
-            self.frames += 1;
-            self.last_advance_ms = time_ms;
-        }
-    }
-
-    pub fn renderGrid(self: *const ColormixRenderer, grid_w: usize, grid_h: usize, out: []Rgb) void {
-        const time = @as(f32, @floatFromInt(self.frames)) * defaults.TIME_SCALE;
-
+    pub fn renderGrid(self: *const ColormixRenderer, time: f32, grid_w: usize, grid_h: usize, out: []Rgb) void {
         for (0..grid_w) |x| {
             for (0..grid_h) |y| {
                 const xi: i32 = @intCast(x);

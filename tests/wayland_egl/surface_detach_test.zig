@@ -3,6 +3,16 @@ const wayland = @import("wayland_test");
 const App = wayland.app.App;
 const SurfaceState = wayland.surface_state.SurfaceState;
 
+test "App owns the only animation state" {
+    try std.testing.expect(@hasField(App, "animation"));
+    try std.testing.expect(!@hasDecl(wayland.effect.Effect, "maybeAdvance"));
+    try std.testing.expect(!@hasDecl(wayland.effect.Effect, "frameCount"));
+    try std.testing.expect(!@hasDecl(wayland.effect.Effect, "setSpeed"));
+    try std.testing.expect(!@hasField(wayland.gpu_effect_state.GpuEffectState, "frames"));
+    try std.testing.expect(!@hasField(wayland.gpu_effect_state.GpuEffectState, "last_advance_ms"));
+    try std.testing.expect(!@hasField(wayland.colormix.ColormixRenderer, "frames"));
+}
+
 fn setDetachFields(state: *SurfaceState, dead: bool, configured: bool, has_extent: bool) void {
     state.dead = dead;
     state.configured = configured;

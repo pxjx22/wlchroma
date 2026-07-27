@@ -16,3 +16,9 @@ test "effect and leaf shaders expose only split state operations" {
     try expectSplitApi(wayland.glass_drift_shader.GlassDriftShader);
     try expectSplitApi(wayland.standard_shader.StandardShader);
 }
+
+test "effect shader receives plain animation time" {
+    const info = @typeInfo(@TypeOf(wayland.effect_shader.EffectShader.setUniforms)).@"fn";
+    try std.testing.expectEqual(@as(usize, 4), info.params.len);
+    try std.testing.expect(info.params[1].type.? == f32);
+}

@@ -5,9 +5,6 @@ pub const SEED: u64 = 7;
 
 /// Timerfd period in nanoseconds (~15fps). 1_000_000_000 / 15 rounded.
 pub const FRAME_INTERVAL_NS: u32 = 66_666_667;
-/// maybeAdvance gate in milliseconds. Slightly below the timer period
-/// (66.67ms) to absorb up to ~10% scheduler jitter without skipping frames.
-pub const FRAME_ADVANCE_MS: u32 = 60;
 
 pub const Rgb = struct {
     r: u8,

@@ -1,7 +1,6 @@
 const std = @import("std");
 const config_mod = @import("../config/config.zig");
 const EffectType = config_mod.EffectType;
-const defaults = @import("../config/defaults.zig");
 const c = @import("../wl.zig").c;
 const Effect = @import("effect.zig").Effect;
 const ColormixShader = @import("colormix_shader.zig").ColormixShader;
@@ -102,27 +101,21 @@ pub const EffectShader = union(EffectType) {
         }
     }
 
-    /// Upload per-frame uniforms: time (= frameCount * TIME_SCALE * speed)
-    /// and resolution. Called every renderTick before draw().
-    /// T032 verification: all 9 new GPU effects reach setUniforms via their
-    /// StandardShader.inner wrapper. effect.speed() returns r.speed for all
-    /// new effect arms in effect.zig. Speed control is correctly wired.
-    /// T033 verification: config speed validation (0.25–2.5) is not effect-type-
-    /// gated — it applies globally in the effect_settings section handler.
-    pub fn setUniforms(self: *const EffectShader, effect: *const Effect, resolution_w: f32, resolution_h: f32) void {
-        const time = @as(f32, @floatFromInt(effect.frameCount())) * defaults.TIME_SCALE * effect.speed();
+    /// Upload App-owned animation time and per-surface resolution.
+    /// Called every renderTick before draw().
+    pub fn setUniforms(self: *const EffectShader, animation_time: f32, resolution_w: f32, resolution_h: f32) void {
         switch (self.*) {
-            .colormix => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .glass_drift => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .frond_haze => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .lumen_tunnel => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .velvet_mesh => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .starfield_fog => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .gyro_echo => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .hex_floret => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .dither_orb => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .signal_matrix => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
-            .fract_lattice => |*sh| sh.setUniforms(time, resolution_w, resolution_h),
+            .colormix => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .glass_drift => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .frond_haze => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .lumen_tunnel => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .velvet_mesh => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .starfield_fog => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .gyro_echo => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .hex_floret => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .dither_orb => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .signal_matrix => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
+            .fract_lattice => |*sh| sh.setUniforms(animation_time, resolution_w, resolution_h),
         }
     }
 

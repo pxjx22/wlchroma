@@ -4,6 +4,7 @@ const Effect = src.effect.Effect;
 const config_mod = src.config;
 const EffectType = config_mod.EffectType;
 const Rgb = src.defaults.Rgb;
+const AnimationState = src.animation_state.AnimationState;
 
 fn configFor(effect_type: EffectType) config_mod.AppConfig {
     var cfg = config_mod.defaultConfig();
@@ -11,28 +12,15 @@ fn configFor(effect_type: EffectType) config_mod.AppConfig {
     return cfg;
 }
 
-test "setSpeed updates the speed multiplier on every effect arm" {
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        const cfg = configFor(@enumFromInt(field.value));
-        var eff = Effect.init(&cfg);
-        try std.testing.expectEqual(@as(f32, 1.0), eff.speed());
-        eff.setSpeed(2.5);
-        try std.testing.expectEqual(@as(f32, 2.5), eff.speed());
-        eff.setSpeed(0.25);
-        try std.testing.expectEqual(@as(f32, 0.25), eff.speed());
-    }
-}
+test "same-effect speed update preserves App animation phase" {
+    var animation = AnimationState.init(1.0);
+    animation.advance(37);
+    const phase_before = animation.phase;
 
-test "setSpeed preserves the effect type and frame counter" {
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        const effect_type: EffectType = @enumFromInt(field.value);
-        const cfg = configFor(effect_type);
-        var eff = Effect.init(&cfg);
-        const frames_before = eff.frameCount();
-        eff.setSpeed(2.0);
-        try std.testing.expectEqual(effect_type, @as(EffectType, eff));
-        try std.testing.expectEqual(frames_before, eff.frameCount());
-    }
+    animation.setSpeed(2.5);
+
+    try std.testing.expectEqual(phase_before, animation.phase);
+    try std.testing.expectEqual(@as(f32, 2.5), animation.speed);
 }
 
 test "updatePalette applies new colors on every effect arm" {
@@ -53,13 +41,18 @@ test "updatePalette applies new colors on every effect arm" {
     }
 }
 
-test "Effect.init honors config speed" {
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        var cfg = configFor(@enumFromInt(field.value));
-        cfg.speed = 1.75;
-        var eff = Effect.init(&cfg);
-        try std.testing.expectEqual(@as(f32, 1.75), eff.speed());
-    }
+test "effect switch reset produces phase zero with the new speed" {
+    var animation = AnimationState.init(1.0);
+    animation.advance(37);
+    var cfg = configFor(.glass_drift);
+    cfg.speed = 1.75;
+
+    const eff = Effect.init(&cfg);
+    animation.reset(cfg.speed);
+
+    try std.testing.expectEqual(EffectType.glass_drift, @as(EffectType, eff));
+    try std.testing.expectEqual(@as(f64, 0.0), animation.phase);
+    try std.testing.expectEqual(@as(f32, 1.75), animation.speed);
 }
 
 const fallback_colors = [3]Rgb{
@@ -69,19 +62,12 @@ const fallback_colors = [3]Rgb{
 };
 
 test "fallback preserves an existing colormix" {
-    var cfg = configFor(.colormix);
-    cfg.frame_advance_ms = 47;
-    cfg.speed = 1.75;
+    const cfg = configFor(.colormix);
     var eff = Effect.init(&cfg);
-    eff.maybeAdvance(100);
-    eff.maybeAdvance(200);
-
-    const frames_before = eff.frameCount();
     const pattern_before = eff.patternMods().?;
 
     try std.testing.expect(!eff.fallbackToColormix(fallback_colors));
     try std.testing.expectEqual(EffectType.colormix, @as(EffectType, eff));
-    try std.testing.expectEqual(frames_before, eff.frameCount());
     try std.testing.expectEqual(pattern_before, eff.patternMods().?);
 }
 
@@ -98,15 +84,16 @@ test "fallback converts every GPU-only effect to colormix" {
     }
 }
 
-test "fallback conversion preserves frame advance and speed" {
-    var cfg = configFor(.glass_drift);
-    cfg.frame_advance_ms = 43;
-    cfg.speed = 2.25;
+test "fallback conversion changes effect tag without changing App phase" {
+    const cfg = configFor(.glass_drift);
     var eff = Effect.init(&cfg);
+    var animation = AnimationState.init(2.25);
+    animation.advance(43);
+    const phase_before = animation.phase;
 
     try std.testing.expect(eff.fallbackToColormix(fallback_colors));
-    try std.testing.expectEqual(@as(u32, 43), eff.frameAdvanceMs());
-    try std.testing.expectEqual(@as(f32, 2.25), eff.speed());
+    try std.testing.expectEqual(EffectType.colormix, @as(EffectType, eff));
+    try std.testing.expectEqual(phase_before, animation.phase);
 }
 
 test "fallback conversion rebuilds colormix palette data from supplied colors" {

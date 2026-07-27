@@ -30,7 +30,7 @@ pub const GlassDriftShader = struct {
     // No loops, no sqrt — arithmetic cost is O(1) per fragment.
     //
     // Uniforms:
-    //   u_time       f32  — frameCount * TIME_SCALE * speed (per-frame)
+    //   u_time       f32  — App-owned animation time (per-frame)
     //   u_resolution vec2 — output pixel dimensions (per-surface)
     //   u_phase      f32  — random session offset (static, set once by uploadStatic)
     //   u_col0       vec3 — base color       (palette[0])

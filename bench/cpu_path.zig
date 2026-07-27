@@ -10,7 +10,7 @@ const ColormixRenderer = src.colormix.ColormixRenderer;
 const warmup_batches: usize = 3;
 const measured_batches: usize = 9;
 const frames_per_batch: usize = 16;
-const fixed_renderer_frame: u64 = 211;
+const fixed_animation_time: f32 = 2.11;
 
 const Case = struct {
     label: []const u8,
@@ -121,6 +121,7 @@ const BenchmarkState = struct {
     fn prepareExpansion(self: *BenchmarkState) void {
         for (0..self.outputs) |output| {
             self.stable_renderer.renderGrid(
+                fixed_animation_time,
                 self.layout.grid_w,
                 self.layout.grid_h,
                 self.cellSlice(output),
@@ -135,6 +136,7 @@ const BenchmarkState = struct {
                 .grid => {
                     for (0..self.outputs) |output| {
                         self.stable_renderer.renderGrid(
+                            fixed_animation_time,
                             self.layout.grid_w,
                             self.layout.grid_h,
                             self.cellSlice(output),
@@ -156,6 +158,7 @@ const BenchmarkState = struct {
                     for (0..self.outputs) |output| {
                         const cells = self.cellSlice(output);
                         self.stable_renderer.renderGrid(
+                            fixed_animation_time,
                             self.layout.grid_w,
                             self.layout.grid_h,
                             cells,
@@ -174,6 +177,7 @@ const BenchmarkState = struct {
                     for (0..self.outputs) |output| {
                         const cells = self.cellSlice(output);
                         renderer.renderGrid(
+                            fixed_animation_time,
                             self.layout.grid_w,
                             self.layout.grid_h,
                             cells,
@@ -217,15 +221,11 @@ pub fn main() !void {
 }
 
 fn makeRenderer(colors: [3]Rgb) ColormixRenderer {
-    var renderer = ColormixRenderer.init(
+    return ColormixRenderer.init(
         colors[0],
         colors[1],
         colors[2],
-        src.defaults.FRAME_ADVANCE_MS,
-        1.0,
     );
-    renderer.frames = fixed_renderer_frame;
-    return renderer;
 }
 
 fn measure(state: *BenchmarkState, phase: Phase) !Measurement {

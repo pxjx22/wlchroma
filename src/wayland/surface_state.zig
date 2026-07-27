@@ -3,6 +3,7 @@ const c = @import("../wl.zig").c;
 const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
 const Effect = @import("../render/effect.zig").Effect;
+const AnimationState = @import("../render/animation_state.zig").AnimationState;
 const EffectShader = @import("../render/effect_shader.zig").EffectShader;
 const GpuUploadState = @import("../render/gpu_upload_state.zig").GpuUploadState;
 const ColormixRenderer = @import("../render/colormix.zig").ColormixRenderer;
@@ -56,6 +57,9 @@ pub const SurfaceState = struct {
     shm_pool: ?ShmPool,
     shm: *c.wl_shm,
     effect: *Effect,
+    /// Borrowed from the App storage finalized before setup; every surface
+    /// is destroyed before App teardown invalidates this pointer.
+    animation: *const AnimationState,
     shm_effect: ?Effect,
     cell_grid: []defaults.Rgb,
     grid_w: usize,
@@ -110,6 +114,7 @@ pub const SurfaceState = struct {
         output: *OutputInfo,
         display: *c.wl_display,
         effect: *Effect,
+        animation: *const AnimationState,
         running: *bool,
         egl_ctx: ?*const EglContext,
         renderer_scale: f32,
@@ -130,6 +135,7 @@ pub const SurfaceState = struct {
             .shm_pool = null,
             .shm = shm,
             .effect = effect,
+            .animation = animation,
             .shm_effect = null,
             .cell_grid = &.{},
             .grid_w = 0,
@@ -190,7 +196,7 @@ pub const SurfaceState = struct {
                         // Offscreen pass: render at reduced resolution
                         ofs.bind();
                         c.glViewport(0, 0, ofs.extent.c_width, ofs.extent.c_height);
-                        sh.setUniforms(self.effect, @floatFromInt(ofs.extent.width), @floatFromInt(ofs.extent.height));
+                        sh.setUniforms(self.animation.time(), @floatFromInt(ofs.extent.width), @floatFromInt(ofs.extent.height));
                         sh.draw();
 
                         // Upscale pass: blit FBO texture to default framebuffer
@@ -199,12 +205,12 @@ pub const SurfaceState = struct {
                         bs.draw(ofs.tex, sh.glProgram(), sh.glVbo(), sh.glAPosLoc());
                     } else {
                         // Blit shader unavailable -- fall back to direct rendering
-                        sh.setUniforms(self.effect, @floatFromInt(extent.width), @floatFromInt(extent.height));
+                        sh.setUniforms(self.animation.time(), @floatFromInt(extent.width), @floatFromInt(extent.height));
                         sh.draw();
                     }
                 } else {
                     // Direct render at full resolution (scale == 1.0)
-                    sh.setUniforms(self.effect, @floatFromInt(extent.width), @floatFromInt(extent.height));
+                    sh.setUniforms(self.animation.time(), @floatFromInt(extent.width), @floatFromInt(extent.height));
                     sh.draw();
                 }
             } else {
@@ -233,11 +239,8 @@ pub const SurfaceState = struct {
         var pool = &(self.shm_pool orelse return);
         const idx = pool.acquireBuffer() orelse return;
 
-        if (getMonotonicMs()) |now_ms| {
-            self.cpuEffect().maybeAdvance(now_ms);
-        }
         const cpu_effect = self.cpuEffect();
-        cpu_effect.renderGrid(self.grid_w, self.grid_h, self.cell_grid);
+        cpu_effect.renderGrid(self.animation.time(), self.grid_w, self.grid_h, self.cell_grid);
         framebuffer.expandCells(self.cell_grid, self.grid_w, self.grid_h, pool.pixelSlice(idx), extent);
 
         c.wl_surface_attach(wl_surface, pool.wlBuffer(idx), 0, 0);
@@ -252,17 +255,6 @@ pub const SurfaceState = struct {
         _ = c.wl_callback_add_listener(cb, &SurfaceState.frame_callback_listener, self);
 
         c.wl_surface_commit(wl_surface);
-    }
-
-    fn getMonotonicMs() ?u32 {
-        var ts: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-        if (rc != 0) {
-            std.debug.print("clock_gettime failed: rc={}\n", .{rc});
-            return null;
-        }
-        const ms: u64 = @intCast(ts.sec * 1000 + @divFloor(ts.nsec, 1_000_000));
-        return @truncate(ms);
     }
 
     pub fn detachGpu(self: *SurfaceState) DetachedGpu {
@@ -410,8 +402,6 @@ pub const SurfaceState = struct {
                 colors[0],
                 colors[1],
                 colors[2],
-                self.effect.frameAdvanceMs(),
-                self.effect.speed(),
             ) };
         } else {
             self.shm_effect.?.updatePalette(colors);
@@ -427,7 +417,7 @@ pub const SurfaceState = struct {
         var new_pool = try ShmPool.init(self.shm, layout);
         errdefer new_pool.deinit();
 
-        self.cpuEffect().renderGrid(layout.grid_w, layout.grid_h, new_grid);
+        self.cpuEffect().renderGrid(self.animation.time(), layout.grid_w, layout.grid_h, new_grid);
         const first = new_pool.acquireBuffer() orelse return error.NoFreeShmBuffer;
         framebuffer.expandCells(
             new_grid,
@@ -584,23 +574,18 @@ fn layerSurfaceConfigure(
     };
 }
 
-/// Frame callback handler. Clears the pending flag and advances the
-/// effect frame counter on the EGL path using the compositor's timestamp.
+/// Frame callback handler. Clears the pending flag so the next timer event
+/// may render this surface.
 fn frameCallbackDone(
     data: ?*anyopaque,
     callback: ?*c.wl_callback,
     time_ms: u32,
 ) callconv(.c) void {
+    _ = time_ms;
     const self: *SurfaceState = @ptrCast(@alignCast(data));
 
     c.wl_callback_destroy(callback);
     self.frame_callback = null;
-
-    // On the EGL path, use the compositor's presentation timestamp to
-    // drive frame advancement (presentation-aligned animation).
-    if (self.egl_surface != null) {
-        self.effect.maybeAdvance(time_ms);
-    }
 }
 
 /// Layer surface closed by the compositor (e.g. output unplugged).

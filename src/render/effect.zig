@@ -38,99 +38,17 @@ pub const Effect = union(EffectType) {
                 config.palette[0],
                 config.palette[1],
                 config.palette[2],
-                config.frame_advance_ms,
-                config.speed,
             ) },
-            .glass_drift => Effect{ .glass_drift = GlassDriftRenderer.init(
-                config.frame_advance_ms,
-                config.speed,
-                config.palette,
-            ) },
-            .frond_haze => Effect{ .frond_haze = FrondHazeRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .lumen_tunnel => Effect{ .lumen_tunnel = LumenTunnelRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .velvet_mesh => Effect{ .velvet_mesh = VelvetMeshRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .starfield_fog => Effect{ .starfield_fog = StarfieldFogRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .gyro_echo => Effect{ .gyro_echo = GyroEchoRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .hex_floret => Effect{ .hex_floret = HexFloretRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .dither_orb => Effect{ .dither_orb = DitherOrbRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .signal_matrix => Effect{ .signal_matrix = SignalMatrixRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-            .fract_lattice => Effect{ .fract_lattice = FractLatticeRenderer.init(config.frame_advance_ms, config.speed, config.palette) },
-        };
-    }
-
-    /// Advance animation frame counter. Both effects share the same gate logic.
-    pub fn maybeAdvance(self: *Effect, time_ms: u32) void {
-        switch (self.*) {
-            .colormix => |*r| r.maybeAdvance(time_ms),
-            .glass_drift => |*r| r.maybeAdvance(time_ms),
-            .frond_haze => |*r| r.maybeAdvance(time_ms),
-            .lumen_tunnel => |*r| r.maybeAdvance(time_ms),
-            .velvet_mesh => |*r| r.maybeAdvance(time_ms),
-            .starfield_fog => |*r| r.maybeAdvance(time_ms),
-            .gyro_echo => |*r| r.maybeAdvance(time_ms),
-            .hex_floret => |*r| r.maybeAdvance(time_ms),
-            .dither_orb => |*r| r.maybeAdvance(time_ms),
-            .signal_matrix => |*r| r.maybeAdvance(time_ms),
-            .fract_lattice => |*r| r.maybeAdvance(time_ms),
-        }
-    }
-
-    /// Current frame count, used by EffectShader.setUniforms to compute time.
-    pub fn frameCount(self: *const Effect) u64 {
-        return switch (self.*) {
-            .colormix => |*r| r.frames,
-            .glass_drift => |*r| r.frames,
-            .frond_haze => |*r| r.frames,
-            .lumen_tunnel => |*r| r.frames,
-            .velvet_mesh => |*r| r.frames,
-            .starfield_fog => |*r| r.frames,
-            .gyro_echo => |*r| r.frames,
-            .hex_floret => |*r| r.frames,
-            .dither_orb => |*r| r.frames,
-            .signal_matrix => |*r| r.frames,
-            .fract_lattice => |*r| r.frames,
-        };
-    }
-
-    /// Speed multiplier from config. Applied to time in EffectShader.setUniforms.
-    pub fn speed(self: *const Effect) f32 {
-        return switch (self.*) {
-            .colormix => |*r| r.speed,
-            .glass_drift => |*r| r.speed,
-            .frond_haze => |*r| r.speed,
-            .lumen_tunnel => |*r| r.speed,
-            .velvet_mesh => |*r| r.speed,
-            .starfield_fog => |*r| r.speed,
-            .gyro_echo => |*r| r.speed,
-            .hex_floret => |*r| r.speed,
-            .dither_orb => |*r| r.speed,
-            .signal_matrix => |*r| r.speed,
-            .fract_lattice => |*r| r.speed,
-        };
-    }
-
-    /// Change the speed multiplier on the running effect without resetting
-    /// its accumulated phase. Reload uses this for same-effect speed changes;
-    /// a full Effect.init would visibly restart the animation.
-    pub fn setSpeed(self: *Effect, new_speed: f32) void {
-        switch (self.*) {
-            inline else => |*r| r.speed = new_speed,
-        }
-    }
-
-    pub fn frameAdvanceMs(self: *const Effect) u32 {
-        return switch (self.*) {
-            .colormix => |*r| r.frame_advance_ms,
-            .glass_drift => |*r| r.frame_advance_ms,
-            .frond_haze => |*r| r.frame_advance_ms,
-            .lumen_tunnel => |*r| r.frame_advance_ms,
-            .velvet_mesh => |*r| r.frame_advance_ms,
-            .starfield_fog => |*r| r.frame_advance_ms,
-            .gyro_echo => |*r| r.frame_advance_ms,
-            .hex_floret => |*r| r.frame_advance_ms,
-            .dither_orb => |*r| r.frame_advance_ms,
-            .signal_matrix => |*r| r.frame_advance_ms,
-            .fract_lattice => |*r| r.frame_advance_ms,
+            .glass_drift => Effect{ .glass_drift = GlassDriftRenderer.init(config.palette) },
+            .frond_haze => Effect{ .frond_haze = FrondHazeRenderer.init(config.palette) },
+            .lumen_tunnel => Effect{ .lumen_tunnel = LumenTunnelRenderer.init(config.palette) },
+            .velvet_mesh => Effect{ .velvet_mesh = VelvetMeshRenderer.init(config.palette) },
+            .starfield_fog => Effect{ .starfield_fog = StarfieldFogRenderer.init(config.palette) },
+            .gyro_echo => Effect{ .gyro_echo = GyroEchoRenderer.init(config.palette) },
+            .hex_floret => Effect{ .hex_floret = HexFloretRenderer.init(config.palette) },
+            .dither_orb => Effect{ .dither_orb = DitherOrbRenderer.init(config.palette) },
+            .signal_matrix => Effect{ .signal_matrix = SignalMatrixRenderer.init(config.palette) },
+            .fract_lattice => Effect{ .fract_lattice = FractLatticeRenderer.init(config.palette) },
         };
     }
 
@@ -153,28 +71,24 @@ pub const Effect = union(EffectType) {
     }
 
     /// Replace a GPU-only effect with its permanent CPU/SHM fallback while
-    /// preserving the configured animation cadence. Existing colormix state
-    /// is already CPU-capable and remains untouched.
+    /// preserving App-owned animation state. Existing colormix state is
+    /// already CPU-capable and remains untouched.
     pub fn fallbackToColormix(self: *Effect, colors: [3]Rgb) bool {
         if (!self.isGpuOnly()) return false;
 
-        const advance_ms = self.frameAdvanceMs();
-        const current_speed = self.speed();
         self.* = .{ .colormix = ColormixRenderer.init(
             colors[0],
             colors[1],
             colors[2],
-            advance_ms,
-            current_speed,
         ) };
         return true;
     }
 
     /// CPU render grid (SHM fallback path). Only implemented for colormix.
     /// Returns without doing anything for GPU-only effects.
-    pub fn renderGrid(self: *const Effect, grid_w: usize, grid_h: usize, out: []Rgb) void {
+    pub fn renderGrid(self: *const Effect, animation_time: f32, grid_w: usize, grid_h: usize, out: []Rgb) void {
         switch (self.*) {
-            .colormix => |*r| r.renderGrid(grid_w, grid_h, out),
+            .colormix => |*r| r.renderGrid(animation_time, grid_w, grid_h, out),
             .glass_drift => {}, // GPU-only: no CPU path
             .frond_haze => {},
             .lumen_tunnel => {},

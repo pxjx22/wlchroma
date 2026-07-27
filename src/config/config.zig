@@ -44,7 +44,6 @@ pub const EffectType = enum {
 pub const AppConfig = struct {
     fps: u32,
     frame_interval_ns: u32,
-    frame_advance_ms: u32,
     effect_type: EffectType,
     palette: [3]Rgb,
     speed: f32,
@@ -56,7 +55,6 @@ pub fn defaultConfig() AppConfig {
     return .{
         .fps = DEFAULT_FPS,
         .frame_interval_ns = defaults.FRAME_INTERVAL_NS,
-        .frame_advance_ms = defaults.FRAME_ADVANCE_MS,
         .effect_type = .colormix,
         .palette = .{ defaults.DEFAULT_COL1, defaults.DEFAULT_COL2, defaults.DEFAULT_COL3 },
         .speed = 1.0,
@@ -305,10 +303,6 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                     const fps_u32: u32 = @intCast(fps);
                     config.fps = fps_u32;
                     config.frame_interval_ns = 1_000_000_000 / fps_u32;
-                    // Jitter margin: ~90% of the frame period in ms
-                    config.frame_advance_ms = @intCast((1000 * 9) / (fps_u32 * 10));
-                    // Clamp to at least 1ms so maybeAdvance is not stuck at 0
-                    if (config.frame_advance_ms == 0) config.frame_advance_ms = 1;
                 } else {
                     std.debug.print("config: line {}: ignoring unknown top-level key '{s}'\n", .{ line_num, kv.key });
                 }
@@ -958,13 +952,6 @@ test "parseStringArray basic" {
     try std.testing.expect(std.mem.eql(u8, "c", arr.buf[2]));
 }
 
-test "frame_advance_ms jitter margin" {
-    // At 15fps: 1000*9 / (15*10) = 9000/150 = 60
-    const toml = "fps = 15\n";
-    const cfg = try parseAndValidate(toml);
-    try std.testing.expectEqual(@as(u32, 60), cfg.frame_advance_ms);
-}
-
 test "parseAndValidate renderer scale" {
     const toml = "[renderer]\nscale = 0.5\n";
     const cfg = try parseAndValidate(toml);
@@ -1003,13 +990,6 @@ test "parseAndValidate missing renderer section uses defaults" {
     const cfg = try parseAndValidate(toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
     try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
-}
-
-test "frame_advance_ms at 120fps" {
-    const toml = "fps = 120\n";
-    const cfg = try parseAndValidate(toml);
-    // 1000*9 / (120*10) = 9000/1200 = 7
-    try std.testing.expectEqual(@as(u32, 7), cfg.frame_advance_ms);
 }
 
 test "parseAndValidate glass_drift effect" {

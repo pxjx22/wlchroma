@@ -7,6 +7,8 @@ const Registry = @import("wayland/registry.zig").Registry;
 const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const Effect = @import("render/effect.zig").Effect;
+const AnimationState = @import("render/animation_state.zig").AnimationState;
+const timer_expirations = @import("render/timer_expirations.zig");
 const EglContext = @import("render/egl_context.zig").EglContext;
 const gpu_epoch = @import("render/gpu_epoch.zig");
 const gpu_fallback = @import("render/gpu_fallback.zig");
@@ -49,6 +51,8 @@ pub const App = struct {
     surfaces: std.ArrayList(*SurfaceState),
     detached_gpu: std.ArrayList(SurfaceState.DetachedGpu),
     effect: Effect,
+    /// Authoritative animation timeline shared by every GPU and CPU surface.
+    animation: AnimationState,
     egl_ctx: ?EglContext,
     effect_shader: ?EffectShader,
     gpu_upload_state: GpuUploadState,
@@ -124,6 +128,7 @@ pub const App = struct {
             .surfaces = .empty,
             .detached_gpu = .empty,
             .effect = effect,
+            .animation = AnimationState.init(config.speed),
             .egl_ctx = null,
             .effect_shader = null,
             .gpu_upload_state = .{},
@@ -218,6 +223,7 @@ pub const App = struct {
                 out,
                 self.display,
                 &self.effect,
+                &self.animation,
                 &self.running,
                 if (self.egl_ctx) |*ctx| ctx else null,
                 self.renderer_scale,
@@ -660,10 +666,12 @@ pub const App = struct {
             } else unreachable;
         }
 
-        // Publish the requested effect and palette before fallback policy
-        // runs so conversion sees the new selection and authoritative colors.
+        // Publish the requested effect and palette, then reset the one App
+        // timeline before fallback policy runs. Conversion sees the requested
+        // selection and authoritative colors but never resets animation.
         self.effect = Effect.init(cfg);
         self.current_palette = cfg.palette;
+        self.animation.reset(cfg.speed);
 
         // Deliberate zero-output epoch closure remains recoverable. Only a
         // permanent context or pipeline failure changes a GPU-only selection
@@ -803,35 +811,48 @@ pub const App = struct {
 
             if (fds[1].revents & linux.POLL.IN != 0) {
                 var buf: [8]u8 = undefined;
-                _ = posix.read(tfd, &buf) catch {};
+                const expiration_count: ?u64 = blk: {
+                    const bytes_read = posix.read(tfd, &buf) catch |err| {
+                        std.debug.print("timerfd read failed: {}; skipping timer event\n", .{err});
+                        break :blk null;
+                    };
+                    break :blk timer_expirations.decode(buf[0..bytes_read]) catch |err| {
+                        std.debug.print("timerfd decode failed: {}; skipping timer event\n", .{err});
+                        break :blk null;
+                    };
+                };
 
-                const render_tick_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
+                if (expiration_count) |expirations| {
+                    self.animation.advance(expirations);
 
-                // Advance an in-flight palette fade once per tick (before drawing
-                // surfaces, which read the shared App.effect palette). Time-based
-                // so it is frame-rate-independent and self-completes if frames are
-                // sparse; settles on the exact target when the duration elapses.
-                if (self.fade) |f| {
-                    const s = color_fade.sample(f, sys.monotonicNs());
-                    self.effect.updatePalette(s.colors);
-                    self.markGpuPaletteDirty();
-                    self.current_palette = s.colors;
-                    if (s.done) self.fade = null;
-                }
+                    const render_tick_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
 
-                const sh_ptr: ?*EffectShader = if (self.effect_shader) |*sh| sh else null;
-                const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
-                for (self.surfaces.items) |s| {
-                    s.renderTick(sh_ptr, &self.gpu_upload_state, blit_ptr);
-                }
-                if (perf_logs_enabled) {
-                    const render_tick_end_ns: u64 = sys.monotonicNs();
-                    render_tick_count += 1;
-                    render_tick_total_ns += render_tick_end_ns - render_tick_start_ns;
-                    if (render_tick_count % perf_log_interval == 0) {
-                        const avg_tick_ms = @as(f64, @floatFromInt(render_tick_total_ns / perf_log_interval)) / std.time.ns_per_ms;
-                        std.debug.print("perf: average renderTick over last {} timer ticks: {d:.3}ms across {} surfaces\n", .{ perf_log_interval, avg_tick_ms, self.surfaces.items.len });
-                        render_tick_total_ns = 0;
+                    // Advance an in-flight palette fade once per tick (before drawing
+                    // surfaces, which read the shared App.effect palette). Time-based
+                    // so it is frame-rate-independent and self-completes if frames are
+                    // sparse; settles on the exact target when the duration elapses.
+                    if (self.fade) |f| {
+                        const s = color_fade.sample(f, sys.monotonicNs());
+                        self.effect.updatePalette(s.colors);
+                        self.markGpuPaletteDirty();
+                        self.current_palette = s.colors;
+                        if (s.done) self.fade = null;
+                    }
+
+                    const sh_ptr: ?*EffectShader = if (self.effect_shader) |*sh| sh else null;
+                    const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
+                    for (self.surfaces.items) |s| {
+                        s.renderTick(sh_ptr, &self.gpu_upload_state, blit_ptr);
+                    }
+                    if (perf_logs_enabled) {
+                        const render_tick_end_ns: u64 = sys.monotonicNs();
+                        render_tick_count += 1;
+                        render_tick_total_ns += render_tick_end_ns - render_tick_start_ns;
+                        if (render_tick_count % perf_log_interval == 0) {
+                            const avg_tick_ms = @as(f64, @floatFromInt(render_tick_total_ns / perf_log_interval)) / std.time.ns_per_ms;
+                            std.debug.print("perf: average renderTick over last {} timer ticks: {d:.3}ms across {} surfaces\n", .{ perf_log_interval, avg_tick_ms, self.surfaces.items.len });
+                            render_tick_total_ns = 0;
+                        }
                     }
                 }
             }
@@ -1351,7 +1372,7 @@ pub const App = struct {
         if (@as(config_mod.EffectType, self.effect) != cfg.effect_type) {
             self.switchEffect(cfg);
         } else {
-            self.effect.setSpeed(cfg.speed);
+            self.animation.setSpeed(cfg.speed);
             self.effect.updatePalette(cfg.palette);
             self.markGpuPaletteDirty();
         }

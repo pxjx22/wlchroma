@@ -402,4 +402,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_animation_state_tests = b.addRunArtifact(animation_state_tests);
     test_step.dependOn(&run_animation_state_tests.step);
+
+    // Timer-expiration decoding is pure and requires an exact native-endian
+    // timerfd record before the application may advance or render.
+    const timer_expirations_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/timer_expirations_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    timer_expirations_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const timer_expirations_tests = b.addTest(.{
+        .root_module = timer_expirations_test_mod,
+    });
+    const run_timer_expirations_tests = b.addRunArtifact(timer_expirations_tests);
+    test_step.dependOn(&run_timer_expirations_tests.step);
 }

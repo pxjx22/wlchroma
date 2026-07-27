@@ -109,7 +109,6 @@ fn appConfig(effect_type: EffectType, palette: [3]AppRgb) AppConfig {
     return .{
         .fps = 15,
         .frame_interval_ns = 66_666_667,
-        .frame_advance_ms = 60,
         .effect_type = effect_type,
         .palette = palette,
         .speed = 1.25,
@@ -124,6 +123,7 @@ fn appFixture(effect_type: EffectType, permanent_failure: bool) App {
     app.surfaces = .empty;
     app.detached_gpu = .empty;
     app.effect = Effect.init(&cfg);
+    app.animation = wayland.animation_state.AnimationState.init(cfg.speed);
     app.egl_ctx = null;
     app.effect_shader = null;
     app.gpu_upload_state = .{};
@@ -190,8 +190,9 @@ test "permanent fallback is idempotent" {
 test "App permanent colormix failure latches fallback and retains colormix" {
     var app = appFixture(.colormix, true);
     app.gpu_upload_state = wayland.gpu_upload_state.GpuUploadState.newGeneration();
-    app.effect.maybeAdvance(1);
+    app.animation.advance(1);
     const before = app.effect;
+    const phase_before = app.animation.phase;
 
     app.applyPermanentGpuFallback();
 
@@ -199,6 +200,7 @@ test "App permanent colormix failure latches fallback and retains colormix" {
     try std.testing.expect(app.gpu_upload_state.isClean());
     try std.testing.expectEqual(EffectType.colormix, std.meta.activeTag(app.effect));
     try std.testing.expect(std.meta.eql(before, app.effect));
+    try std.testing.expectEqual(phase_before, app.animation.phase);
 }
 
 test "App permanent GPU-only failure converts from current palette" {
@@ -218,16 +220,16 @@ test "App permanent GPU-only failure converts from current palette" {
     );
 }
 
-test "App second permanent fallback preserves advanced colormix frame" {
+test "App second permanent fallback preserves advanced animation phase" {
     var app = appFixture(.glass_drift, true);
     app.applyPermanentGpuFallback();
-    app.effect.maybeAdvance(1);
-    const advanced_frame = app.effect.frameCount();
+    app.animation.advance(1);
+    const advanced_phase = app.animation.phase;
 
     app.applyPermanentGpuFallback();
 
-    try std.testing.expectEqual(@as(u64, 1), advanced_frame);
-    try std.testing.expectEqual(advanced_frame, app.effect.frameCount());
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0125), advanced_phase, 1e-12);
+    try std.testing.expectEqual(advanced_phase, app.animation.phase);
 }
 
 test "App recoverable state leaves fallback state and effect unchanged" {
