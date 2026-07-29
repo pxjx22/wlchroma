@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const posix = std.posix;
 const linux = std.os.linux;
 const c = @import("wl.zig").c;
@@ -19,6 +20,7 @@ const GpuUploadState = @import("render/gpu_upload_state.zig").GpuUploadState;
 const color_fade = @import("render/color_fade.zig");
 const defaults = @import("config/defaults.zig");
 const config_mod = @import("config/config.zig");
+const reload_job_mod = @import("config/reload_job.zig");
 const AppConfig = config_mod.AppConfig;
 const NamedPalette = config_mod.NamedPalette;
 const UpscaleFilter = config_mod.UpscaleFilter;
@@ -62,10 +64,35 @@ pub const App = struct {
         pub fn updateFrameTimer(app: *App) void {
             app.updateFrameTimer();
         }
+
+        pub fn serviceIpc(app: *App, revents: i16, now_ns: u64) void {
+            app.serviceActiveIpcClient(revents, now_ns);
+        }
+
+        pub fn pollTimeoutAt(app: *App, now_ns: u64) i32 {
+            return app.pollTimeoutAt(now_ns);
+        }
+
+        pub fn serviceReloadReady(app: *App) void {
+            app.serviceReloadReady();
+        }
+
+        pub fn forceReloadTimerFailure() bool {
+            return build_options.phase3c_force_reload_timer_failure;
+        }
     } else void;
 
     const FrameTimer = struct {
         fn set(_: *@This(), fd: posix.fd_t, value: *const linux.itimerspec) !void {
+            try sys.timerfdSettime(fd, value);
+        }
+    };
+
+    const ReloadFrameTimer = struct {
+        fn set(_: *@This(), fd: posix.fd_t, value: *const linux.itimerspec) !void {
+            if (build_options.phase3c_force_reload_timer_failure) {
+                return error.TimerFdSetTimeFailed;
+            }
             try sys.timerfdSettime(fd, value);
         }
     };
@@ -107,6 +134,9 @@ pub const App = struct {
     sig_fd: posix.fd_t,
     ipc_server: ?IpcServer,
     ipc_client: ?IpcConnection,
+    reload_job: ?*reload_job_mod.ReloadJob,
+    reload_ops: reload_job_mod.ReloadOps,
+    shutdown_pending: bool,
     /// Config path for reload. Null when wlchroma was started without --config
     /// and no default config file was found.
     config_path: ?[]const u8,
@@ -179,6 +209,9 @@ pub const App = struct {
             .sig_fd = sig_fd,
             .ipc_server = null,
             .ipc_client = null,
+            .reload_job = null,
+            .reload_ops = reload_job_mod.production_ops,
+            .shutdown_pending = false,
             .config_path = config_path,
             .palettes = palettes,
             .active_palette_name_buf = std.mem.zeroes([64]u8),
@@ -781,11 +814,14 @@ pub const App = struct {
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
 
         // fds[0]=wayland  fds[1]=timerfd  fds[2]=signalfd
-        // fds[3]=IPC listener or the one active IPC client
-        var fds = [4]posix.pollfd{
+        // fds[3]=normal IPC listener/client  fds[4]=reload eventfd
+        // fds[5]=transferred reload client
+        var fds = [6]posix.pollfd{
             .{ .fd = wl_fd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = tfd, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = self.sig_fd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = -1, .events = 0, .revents = 0 },
+            .{ .fd = -1, .events = 0, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
 
@@ -802,7 +838,7 @@ pub const App = struct {
                 // this path would wait for the next poll wake, which may be
                 // indefinite with the frame timer disarmed.
                 self.syncSurfaces();
-                self.expireIpcClient();
+                _ = self.ipcPollTimeout();
                 if (!self.running) break;
                 continue;
             }
@@ -813,10 +849,10 @@ pub const App = struct {
                 break;
             }
             const ipc_role = self.configureIpcPollSlot(&fds[3]);
-            const nfds: usize = if (ipc_role == .none) 3 else 4;
+            self.configureReloadPollSlots(&fds[4], &fds[5]);
 
-            for (fds[0..nfds]) |*poll_fd| poll_fd.revents = 0;
-            _ = posix.poll(fds[0..nfds], poll_timeout) catch |err| {
+            for (&fds) |*poll_fd| poll_fd.revents = 0;
+            _ = posix.poll(&fds, poll_timeout) catch |err| {
                 c.wl_display_cancel_read(self.display);
                 std.debug.print("poll error: {}\n", .{err});
                 break;
@@ -848,6 +884,8 @@ pub const App = struct {
 
             // Reconcile surfaces with outputs that appeared in this batch.
             self.syncSurfaces();
+            _ = self.ipcPollTimeout();
+            if (!self.running) break;
 
             if (fds[1].revents & linux.POLL.IN != 0) {
                 var buf: [8]u8 = undefined;
@@ -910,11 +948,36 @@ pub const App = struct {
             if (self.running and ipc_role != .none) {
                 self.serviceIpcSlot(ipc_role, fds[3].revents);
             }
+            if (self.running) self.serviceReloadClient(fds[5].revents);
+            if (self.running) {
+                if (fds[4].revents & poll_terminal != 0) {
+                    if (self.reload_job) |job| {
+                        if (job.phase != .responding) job.notification_fault = true;
+                    }
+                }
+                const reload_ready = if (self.reload_job) |job|
+                    job.phase != .responding and job.readyAcquire()
+                else
+                    false;
+                if (fds[4].revents & (linux.POLL.IN | poll_terminal) != 0 or reload_ready) {
+                    self.serviceReloadReady();
+                }
+            }
         }
     }
 
-    const CommandOutcome = enum { keep_running, shutdown_after_flush };
+    const CommandOutcome = enum {
+        response_ready,
+        deferred_reload,
+        shutdown_after_flush,
+    };
     const IpcPollRole = enum { none, listener, client };
+    const IpcReadAction = union(enum) {
+        none,
+        close,
+        response_ready,
+        command: dispatch.IpcCommand,
+    };
 
     fn configureIpcPollSlot(self: *App, slot: *posix.pollfd) IpcPollRole {
         slot.revents = 0;
@@ -933,36 +996,85 @@ pub const App = struct {
         return .none;
     }
 
-    fn expireIpcClient(self: *App) void {
-        if (self.ipc_client == null) return;
-        const now_ns = sys.monotonicNsChecked() catch |err| {
-            std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
-            self.closeIpcClient();
-            return;
+    fn configureReloadPollSlots(
+        self: *App,
+        notifier_slot: *posix.pollfd,
+        client_slot: *posix.pollfd,
+    ) void {
+        notifier_slot.* = .{ .fd = -1, .events = 0, .revents = 0 };
+        client_slot.* = .{ .fd = -1, .events = 0, .revents = 0 };
+        const job = self.reload_job orelse return;
+
+        if (job.phase != .responding and !job.notification_fault) {
+            notifier_slot.fd = job.event_fd;
+            notifier_slot.events = linux.POLL.IN;
+        }
+        if (job.client) |*client| {
+            client_slot.fd = client.fd;
+            client_slot.events = if (job.phase == .responding)
+                client.pollEvents()
+            else
+                0;
+        }
+    }
+
+    fn minPollTimeout(current: i32, candidate: i32) i32 {
+        if (current < 0) return candidate;
+        return @min(current, candidate);
+    }
+
+    fn pollTimeoutAt(self: *App, now_ns: u64) i32 {
+        var timeout_ms: i32 = -1;
+
+        var normal_expired = false;
+        if (self.ipc_client) |*client| {
+            normal_expired = client.expired(now_ns);
+            if (!normal_expired) {
+                timeout_ms = minPollTimeout(timeout_ms, client.timeoutMs(now_ns));
+            }
+        }
+        if (normal_expired) self.closeIpcClient();
+
+        var reload_response_expired = false;
+        if (self.reload_job) |job| switch (job.phase) {
+            .loading, .orphaned => {
+                timeout_ms = minPollTimeout(timeout_ms, 500);
+            },
+            .responding => {
+                if (job.client) |*client| {
+                    reload_response_expired = client.expired(now_ns);
+                    if (!reload_response_expired) {
+                        timeout_ms = minPollTimeout(timeout_ms, client.timeoutMs(now_ns));
+                    }
+                } else {
+                    reload_response_expired = true;
+                }
+            },
         };
-        var expired = false;
-        if (self.ipc_client) |*client| expired = client.expired(now_ns);
-        if (expired) self.closeIpcClient();
+        if (reload_response_expired) self.destroyReloadJob();
+
+        return timeout_ms;
     }
 
     fn ipcPollTimeout(self: *App) i32 {
-        if (self.ipc_client == null) return -1;
-        const now_ns = sys.monotonicNsChecked() catch |err| {
-            std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
-            self.closeIpcClient();
-            return -1;
+        var has_deadline = self.ipc_client != null;
+        var loading_reload = false;
+        if (self.reload_job) |job| switch (job.phase) {
+            .loading, .orphaned => loading_reload = true,
+            .responding => has_deadline = job.client != null or has_deadline,
         };
-        var expired = false;
-        var timeout_ms: i32 = -1;
-        if (self.ipc_client) |*client| {
-            expired = client.expired(now_ns);
-            if (!expired) timeout_ms = client.timeoutMs(now_ns);
-        }
-        if (expired) {
+
+        if (!has_deadline) return if (loading_reload) 500 else -1;
+
+        const now_ns = self.reload_ops.monotonic_ns(self.reload_ops.context) catch |err| {
+            std.debug.print("ipc: monotonic clock failed: {}; closing bounded clients\n", .{err});
             self.closeIpcClient();
-            return -1;
-        }
-        return timeout_ms;
+            if (self.reload_job) |job| {
+                if (job.phase == .responding) self.destroyReloadJob();
+            }
+            return if (self.reload_job != null) 500 else -1;
+        };
+        return self.pollTimeoutAt(now_ns);
     }
 
     fn acceptIpcClient(self: *App) void {
@@ -974,7 +1086,7 @@ pub const App = struct {
                 return;
             },
         };
-        const now_ns = sys.monotonicNsChecked() catch |err| {
+        const now_ns = self.reload_ops.monotonic_ns(self.reload_ops.context) catch |err| {
             std.debug.print("ipc: monotonic clock failed after accept: {}\n", .{err});
             sys.close(client_fd);
             return;
@@ -1000,7 +1112,7 @@ pub const App = struct {
                 }
             },
             .client => {
-                const now_ns = sys.monotonicNsChecked() catch |err| {
+                const now_ns = self.reload_ops.monotonic_ns(self.reload_ops.context) catch |err| {
                     std.debug.print("ipc: monotonic clock failed: {}; closing client\n", .{err});
                     self.closeIpcClient();
                     return;
@@ -1020,65 +1132,74 @@ pub const App = struct {
         }
 
         var should_close = false;
-        if (self.ipc_client) |*client| {
-            switch (client.state) {
-                .reading => reading: {
-                    if (revents & linux.POLL.IN == 0) break :reading;
-                    const outcome = client.readReady() catch |err| {
-                        std.debug.print("ipc: client read failed: {}\n", .{err});
-                        should_close = true;
-                        break :reading;
-                    };
-                    switch (outcome) {
-                        .incomplete => {},
-                        .complete => |line| {
-                            if (!self.queueCommandResponse(client, line)) {
-                                should_close = true;
-                            }
+        var deferred_reload = false;
+        switch (self.ipc_client.?.state) {
+            .reading => {
+                if (revents & linux.POLL.IN != 0) {
+                    const action = self.readActiveIpcCommand();
+                    switch (action) {
+                        .none => {},
+                        .close => should_close = true,
+                        .response_ready => self.beginIpcResponseAt(now_ns, false),
+                        .command => |cmd| {
+                            const outcome = self.queueCommandResponse(cmd, now_ns);
+                            deferred_reload = outcome == .deferred_reload;
                         },
-                        .line_too_long => {
-                            dispatch.appendError(&client.response, "command too long");
-                            if (!self.beginIpcResponse(client, false)) {
-                                should_close = true;
-                            }
-                        },
-                        .extra_data => {
-                            dispatch.appendError(
-                                &client.response,
-                                "multiple commands are not supported",
-                            );
-                            if (!self.beginIpcResponse(client, false)) {
-                                should_close = true;
-                            }
-                        },
-                        .peer_closed => should_close = true,
                     }
-                },
-                .writing => writing: {
-                    if (revents & linux.POLL.OUT == 0) break :writing;
+                }
+            },
+            .writing => writing: {
+                if (revents & linux.POLL.OUT != 0) {
+                    const client = &self.ipc_client.?;
                     const outcome = client.flushReady() catch |err| {
                         std.debug.print("ipc: client write failed: {}\n", .{err});
                         should_close = true;
                         break :writing;
                     };
                     if (outcome == .complete) should_close = true;
-                },
-                .closed => should_close = true,
-            }
+                }
+            },
+            .closed => should_close = true,
+        }
 
-            // HUP may accompany the last readable request bytes, so expected IO
-            // is serviced first. A terminal revent then closes this connection.
-            const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
-            if (!should_close and revents & terminal != 0) should_close = true;
+        // HUP may accompany the last readable request bytes, so expected IO
+        // is serviced first. A successful reload moved the whole connection;
+        // route that same terminal event to its new owner without touching the
+        // now-empty normal-client optional.
+        const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+        if (revents & terminal != 0) {
+            if (deferred_reload) {
+                if (self.reload_job) |job| job.orphanClient();
+            } else {
+                should_close = true;
+            }
         }
         if (should_close) self.closeIpcClient();
     }
 
-    fn queueCommandResponse(
-        self: *App,
-        client: *IpcConnection,
-        line: []const u8,
-    ) bool {
+    fn readActiveIpcCommand(self: *App) IpcReadAction {
+        const client = &self.ipc_client.?;
+        const outcome = client.readReady() catch |err| {
+            std.debug.print("ipc: client read failed: {}\n", .{err});
+            return .close;
+        };
+        const line = switch (outcome) {
+            .incomplete => return .none,
+            .line_too_long => {
+                dispatch.appendError(&client.response, "command too long");
+                return .response_ready;
+            },
+            .extra_data => {
+                dispatch.appendError(
+                    &client.response,
+                    "multiple commands are not supported",
+                );
+                return .response_ready;
+            },
+            .peer_closed => return .close,
+            .complete => |line| line,
+        };
+
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
         const space = std.mem.indexOfScalar(u8, trimmed, ' ');
         const verb = if (space) |index| trimmed[0..index] else trimmed;
@@ -1111,33 +1232,27 @@ pub const App = struct {
                     dispatch.appendError(&client.response, msg);
                 },
             }
-            return self.beginIpcResponse(client, false);
+            return .response_ready;
         };
-
-        const outcome = self.dispatchCommand(&client.response, cmd);
-        return self.beginIpcResponse(
-            client,
-            outcome == .shutdown_after_flush,
-        );
+        return .{ .command = cmd };
     }
 
-    fn beginIpcResponse(
-        _: *App,
-        client: *IpcConnection,
-        shutdown_after_flush: bool,
-    ) bool {
-        const response_now_ns = sys.monotonicNsChecked() catch |err| {
-            std.debug.print(
-                "ipc: monotonic clock failed before response: {}; closing client\n",
-                .{err},
-            );
-            // A successfully dispatched stop must still shut down when the clock
-            // failure makes a bounded response phase impossible.
-            client.shutdown_after_flush = shutdown_after_flush;
-            return false;
-        };
-        client.beginWriting(response_now_ns, shutdown_after_flush);
-        return true;
+    fn queueCommandResponse(
+        self: *App,
+        cmd: dispatch.IpcCommand,
+        now_ns: u64,
+    ) CommandOutcome {
+        const outcome = self.dispatchCommand(cmd);
+        switch (outcome) {
+            .response_ready => self.beginIpcResponseAt(now_ns, false),
+            .shutdown_after_flush => self.beginIpcResponseAt(now_ns, true),
+            .deferred_reload => {},
+        }
+        return outcome;
+    }
+
+    fn beginIpcResponseAt(self: *App, now_ns: u64, shutdown_after_flush: bool) void {
+        self.ipc_client.?.beginWriting(now_ns, shutdown_after_flush);
     }
 
     fn closeIpcClient(self: *App) void {
@@ -1147,6 +1262,45 @@ pub const App = struct {
         }
         self.ipc_client = null;
         if (shutdown_after_close) self.running = false;
+    }
+
+    fn destroyReloadJob(self: *App) void {
+        const job = self.reload_job orelse return;
+        var shutdown_after_close = false;
+        if (job.client) |*client| shutdown_after_close = client.close();
+        job.client = null;
+        job.deinit();
+        self.reload_job = null;
+        if (shutdown_after_close) self.running = false;
+    }
+
+    fn serviceReloadClient(self: *App, revents: i16) void {
+        const job = self.reload_job orelse return;
+        if (job.client == null) return;
+
+        const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+        if (job.phase != .responding) {
+            if (revents & terminal != 0) job.orphanClient();
+            return;
+        }
+
+        var should_close = false;
+        if (job.client) |*client| switch (client.state) {
+            .reading => {},
+            .writing => writing: {
+                if (revents & linux.POLL.OUT != 0) {
+                    const outcome = client.flushReady() catch |err| {
+                        std.debug.print("ipc: reload client write failed: {}\n", .{err});
+                        should_close = true;
+                        break :writing;
+                    };
+                    if (outcome == .complete) should_close = true;
+                }
+            },
+            .closed => should_close = true,
+        };
+        if (revents & terminal != 0) should_close = true;
+        if (should_close) self.destroyReloadJob();
     }
 
     fn handleSignalEvent(self: *App) void {
@@ -1184,11 +1338,13 @@ pub const App = struct {
         }
     }
 
-    fn dispatchCommand(
-        self: *App,
-        out: *ResponseQueue,
-        cmd: dispatch.IpcCommand,
-    ) CommandOutcome {
+    fn dispatchCommand(self: *App, cmd: dispatch.IpcCommand) CommandOutcome {
+        switch (cmd) {
+            .reload => return self.handleReload(),
+            else => {},
+        }
+
+        const out = &self.ipc_client.?.response;
         switch (cmd) {
             .query => self.handleQuery(out),
             .stop => {
@@ -1201,9 +1357,9 @@ pub const App = struct {
             .set_colors => |set_colors| {
                 self.handleSetColors(out, set_colors.colors, set_colors.fade_ms);
             },
-            .reload => self.handleReload(out),
+            .reload => unreachable,
         }
-        return .keep_running;
+        return .response_ready;
     }
 
     // --- IPC command handlers ---
@@ -1232,7 +1388,8 @@ pub const App = struct {
         dispatch.appendOk(out);
     }
 
-    fn handleStop(_: *App, out: *ResponseQueue) void {
+    fn handleStop(self: *App, out: *ResponseQueue) void {
+        self.shutdown_pending = true;
         dispatch.appendOk(out);
     }
 
@@ -1388,37 +1545,155 @@ pub const App = struct {
         dispatch.appendOk(out);
     }
 
-    fn handleReload(self: *App, out: *ResponseQueue) void {
-        var load_result = config_mod.loadConfigFullRequireFile(
+    fn beginReload(self: *App) !void {
+        if (self.reload_job != null) return error.ReloadAlreadyInProgress;
+        const resolved = config_mod.resolveConfigPathForReload(
             self.allocator,
-            self.io,
             self.environ,
             self.config_path,
-        ) catch |err| {
-            if (err == error.ConfigFileNotFound) {
-                dispatch.appendError(out, "config file not found");
-                return;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.ConfigFileNotFound,
+        };
+        defer self.allocator.free(resolved.path);
+
+        const job = try reload_job_mod.ReloadJob.start(
+            self.allocator,
+            self.io,
+            resolved,
+            self.reload_ops,
+        );
+        job.takeClient(&self.ipc_client);
+        self.reload_job = job;
+    }
+
+    fn handleReload(self: *App) CommandOutcome {
+        self.beginReload() catch |err| {
+            const out = &self.ipc_client.?.response;
+            switch (err) {
+                error.ReloadAlreadyInProgress => {
+                    dispatch.appendError(out, "reload already in progress");
+                },
+                error.ConfigFileNotFound => {
+                    dispatch.appendError(out, "config file not found");
+                },
+                else => {
+                    var buf: [128]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &buf,
+                        "reload start failed: {}",
+                        .{err},
+                    ) catch "reload start failed";
+                    dispatch.appendError(out, msg);
+                },
             }
-            var buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &buf,
-                "config parse failed: {}",
+            return .response_ready;
+        };
+        return .deferred_reload;
+    }
+
+    fn appendReloadError(job: *reload_job_mod.ReloadJob, msg: []const u8) void {
+        if (job.client) |*client| {
+            dispatch.appendError(&client.response, msg);
+        } else {
+            std.debug.print("reload: {s}\n", .{msg});
+        }
+    }
+
+    fn beginReloadResponse(self: *App, job: *reload_job_mod.ReloadJob) void {
+        if (job.phase == .orphaned or job.client == null) {
+            self.destroyReloadJob();
+            return;
+        }
+        const now_ns = job.ops.monotonic_ns(job.ops.context) catch |err| {
+            std.debug.print(
+                "ipc: monotonic clock failed before reload response: {}; closing client\n",
                 .{err},
-            ) catch "config parse failed";
-            dispatch.appendError(out, msg);
+            );
+            self.destroyReloadJob();
             return;
         };
-        self.applyReloadSnapshot(&load_result) catch |err| {
-            var buf: [64]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &buf,
-                "timerfd_settime failed: {}",
-                .{err},
-            ) catch "timerfd_settime failed";
-            dispatch.appendError(out, msg);
+        job.client.?.beginWriting(now_ns, false);
+    }
+
+    fn serviceReloadReady(self: *App) void {
+        if (!self.running or self.shutdown_pending) return;
+        const job = self.reload_job orelse return;
+        if (job.phase == .responding) return;
+
+        if (!job.notification_fault) {
+            _ = job.ops.eventfd_read(job.ops.context, job.event_fd) catch |err| switch (err) {
+                error.WouldBlock => {},
+                else => {
+                    std.debug.print("reload: completion notification read failed: {}\n", .{err});
+                    job.notification_fault = true;
+                },
+            };
+        }
+        if (!job.readyAcquire()) return;
+
+        job.joinOnce();
+        const notification_error = job.notification_error;
+        const notification_fault = job.notification_fault;
+        const outcome = job.takeOutcomeAfterJoin();
+
+        if (notification_fault or notification_error != null) {
+            switch (outcome) {
+                .loaded => |loaded_value| {
+                    var loaded = loaded_value;
+                    loaded.deinit(self.allocator);
+                },
+                else => {},
+            }
+            if (notification_error) |err| {
+                var buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(
+                    &buf,
+                    "reload notification failed: {}",
+                    .{err},
+                ) catch "reload notification failed";
+                appendReloadError(job, msg);
+            } else {
+                appendReloadError(job, "reload notification failed");
+            }
+            self.beginReloadResponse(job);
             return;
-        };
-        dispatch.appendOk(out);
+        }
+
+        switch (outcome) {
+            .pending => {
+                appendReloadError(job, "reload completed without a result");
+            },
+            .failed => |err| {
+                if (err == error.ConfigFileNotFound) {
+                    appendReloadError(job, "config file not found");
+                } else {
+                    var buf: [128]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &buf,
+                        "config parse failed: {}",
+                        .{err},
+                    ) catch "config parse failed";
+                    appendReloadError(job, msg);
+                }
+            },
+            .loaded => |loaded_value| {
+                var candidate = loaded_value;
+                self.applyReloadSnapshot(&candidate) catch |err| {
+                    var buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(
+                        &buf,
+                        "timerfd_settime failed: {}",
+                        .{err},
+                    ) catch "timerfd_settime failed";
+                    appendReloadError(job, msg);
+                    self.beginReloadResponse(job);
+                    return;
+                };
+                if (job.client) |*client| dispatch.appendOk(&client.response);
+            },
+        }
+        self.beginReloadResponse(job);
     }
 
     fn applyReloadSnapshotWith(
@@ -1455,8 +1730,8 @@ pub const App = struct {
         self: *App,
         candidate: *config_mod.LoadResult,
     ) !void {
-        var timer = FrameTimer{};
-        try self.applyReloadSnapshotWith(candidate, FrameTimer, &timer);
+        var timer = ReloadFrameTimer{};
+        try self.applyReloadSnapshotWith(candidate, ReloadFrameTimer, &timer);
     }
 
     fn applyReloadEffectConfig(self: *App, cfg: *const AppConfig) void {
@@ -1472,6 +1747,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.closeIpcClient();
+        self.destroyReloadJob();
         if (self.ipc_server) |*srv| srv.deinit();
         self.ipc_server = null;
         self.allocator.free(self.palettes);

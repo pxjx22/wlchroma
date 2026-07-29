@@ -346,6 +346,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_app_reload_tests = b.addRunArtifact(app_reload_tests);
     phase2_test_step.dependOn(&run_app_reload_tests.step);
+    reload_test_step.dependOn(&run_app_reload_tests.step);
     test_step.dependOn(&run_app_reload_tests.step);
 
     const effect_shader_api_test_mod = b.createModule(.{
