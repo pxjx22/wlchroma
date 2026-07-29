@@ -40,7 +40,31 @@ pub const App = struct {
         pub fn applyReloadEffectConfig(app: *App, cfg: *const AppConfig) void {
             app.applyReloadEffectConfig(cfg);
         }
+
+        pub fn applyFrameInterval(
+            app: *App,
+            interval_ns: u32,
+            comptime Timer: type,
+            timer: *Timer,
+        ) !void {
+            return app.applyFrameIntervalWith(interval_ns, Timer, timer);
+        }
+
+        pub fn applyReloadSnapshot(
+            app: *App,
+            candidate: *config_mod.LoadResult,
+            comptime Timer: type,
+            timer: *Timer,
+        ) !void {
+            return app.applyReloadSnapshotWith(candidate, Timer, timer);
+        }
     } else void;
+
+    const FrameTimer = struct {
+        fn set(_: *@This(), fd: posix.fd_t, value: *const linux.itimerspec) !void {
+            try sys.timerfdSettime(fd, value);
+        }
+    };
 
     allocator: std.mem.Allocator,
     /// Io interface and environment from std.process.Init, retained for
@@ -1217,24 +1241,38 @@ pub const App = struct {
             return;
         }
         const interval_ns: u32 = @intCast(1_000_000_000 / @as(u64, fps));
+        self.applyFrameInterval(interval_ns) catch |err| {
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "timerfd_settime failed: {}",
+                .{err},
+            ) catch "timerfd_settime failed";
+            dispatch.appendError(out, msg);
+            return;
+        };
+        dispatch.appendOk(out);
+    }
+
+    fn applyFrameIntervalWith(
+        self: *App,
+        interval_ns: u32,
+        comptime Timer: type,
+        timer: *Timer,
+    ) !void {
         if (self.timer_armed) {
             const interval = linux.itimerspec{
                 .it_value = .{ .sec = 0, .nsec = interval_ns },
                 .it_interval = .{ .sec = 0, .nsec = interval_ns },
             };
-            sys.timerfdSettime(self.tfd, &interval) catch |err| {
-                var buf: [64]u8 = undefined;
-                const msg = std.fmt.bufPrint(
-                    &buf,
-                    "timerfd_settime failed: {}",
-                    .{err},
-                ) catch "timerfd_settime failed";
-                dispatch.appendError(out, msg);
-                return;
-            };
+            try timer.set(self.tfd, &interval);
         }
         self.frame_interval_ns = interval_ns;
-        dispatch.appendOk(out);
+    }
+
+    fn applyFrameInterval(self: *App, interval_ns: u32) !void {
+        var timer = FrameTimer{};
+        try self.applyFrameIntervalWith(interval_ns, FrameTimer, &timer);
     }
 
     fn handleSetScale(self: *App, out: *ResponseQueue, scale: f32) void {
@@ -1344,7 +1382,7 @@ pub const App = struct {
     }
 
     fn handleReload(self: *App, out: *ResponseQueue) void {
-        const load_result = config_mod.loadConfigFullRequireFile(
+        var load_result = config_mod.loadConfigFullRequireFile(
             self.allocator,
             self.io,
             self.environ,
@@ -1363,17 +1401,31 @@ pub const App = struct {
             dispatch.appendError(out, msg);
             return;
         };
-        const cfg = &load_result.config;
+        self.applyReloadSnapshot(&load_result) catch |err| {
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "timerfd_settime failed: {}",
+                .{err},
+            ) catch "timerfd_settime failed";
+            dispatch.appendError(out, msg);
+            return;
+        };
+        dispatch.appendOk(out);
+    }
 
-        const new_interval_ns = cfg.frame_interval_ns;
-        if (self.timer_armed) {
-            const new_interval = linux.itimerspec{
-                .it_value = .{ .sec = 0, .nsec = new_interval_ns },
-                .it_interval = .{ .sec = 0, .nsec = new_interval_ns },
-            };
-            sys.timerfdSettime(self.tfd, &new_interval) catch {};
-        }
-        self.frame_interval_ns = new_interval_ns;
+    fn applyReloadSnapshotWith(
+        self: *App,
+        candidate: *config_mod.LoadResult,
+        comptime Timer: type,
+        timer: *Timer,
+    ) !void {
+        const cfg = &candidate.config;
+
+        self.applyFrameIntervalWith(cfg.frame_interval_ns, Timer, timer) catch |err| {
+            candidate.deinit(self.allocator);
+            return err;
+        };
 
         if (cfg.upscale_filter != self.upscale_filter) {
             self.upscale_filter = cfg.upscale_filter;
@@ -1387,9 +1439,17 @@ pub const App = struct {
         self.applyReloadEffectConfig(cfg);
 
         self.allocator.free(self.palettes);
-        self.palettes = load_result.palettes;
+        self.palettes = candidate.palettes;
         self.active_palette_name_len = 0;
-        dispatch.appendOk(out);
+        candidate.* = undefined;
+    }
+
+    fn applyReloadSnapshot(
+        self: *App,
+        candidate: *config_mod.LoadResult,
+    ) !void {
+        var timer = FrameTimer{};
+        try self.applyReloadSnapshotWith(candidate, FrameTimer, &timer);
     }
 
     fn applyReloadEffectConfig(self: *App, cfg: *const AppConfig) void {

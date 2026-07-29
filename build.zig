@@ -303,6 +303,19 @@ pub fn build(b: *std.Build) void {
     phase2_test_step.dependOn(&run_gpu_fallback_tests.step);
     test_step.dependOn(&run_gpu_fallback_tests.step);
 
+    const app_reload_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/app_reload_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    app_reload_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const app_reload_tests = b.addTest(.{
+        .root_module = app_reload_test_mod,
+    });
+    const run_app_reload_tests = b.addRunArtifact(app_reload_tests);
+    phase2_test_step.dependOn(&run_app_reload_tests.step);
+    test_step.dependOn(&run_app_reload_tests.step);
+
     const effect_shader_api_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/effect_shader_api_test.zig"),
         .target = target,

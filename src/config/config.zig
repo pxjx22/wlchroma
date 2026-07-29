@@ -25,6 +25,11 @@ pub const NamedPalette = struct {
 pub const LoadResult = struct {
     config: AppConfig,
     palettes: []NamedPalette,
+
+    pub fn deinit(result: *LoadResult, allocator: std.mem.Allocator) void {
+        allocator.free(result.palettes);
+        result.* = undefined;
+    }
 };
 
 pub const EffectType = enum {
@@ -1194,7 +1199,8 @@ fn parseDocumentWithPaletteCount(palette_count: usize) !ParsedDocument {
     defer toml.deinit(std.testing.allocator);
 
     for (0..palette_count) |i| {
-        try toml.print(std.testing.allocator,
+        try toml.print(
+            std.testing.allocator,
             "[[palettes]]\nname = \"palette-{}\"\ncolors = [\"#010203\", \"#040506\", \"#070809\"]\n",
             .{i},
         );
