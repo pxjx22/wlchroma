@@ -70,7 +70,9 @@ Use this commit format:
 <type>(<scope>): <description>
 ```
 
-Common types: `feat`, `fix`, `test`, `docs`, `refactor`
+Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `bench`.
+Use `bench` for benchmark harness/evidence commits and `perf` for retained
+production performance changes.
 
 Common scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`
 

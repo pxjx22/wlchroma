@@ -15,7 +15,7 @@ Committed guidance: `README.md` (user-visible behavior), `CONTRIBUTING.md` (proc
 
 ## Toolchain gotchas
 
-- Zig is pinned to **0.16.0** (`.zig-version`, CI). `build.zig.zon` claims a lower minimum — ignore that; use the pin. Do not upgrade without a deliberate decision.
+- Zig is pinned to **0.16.0** (`.zig-version`, CI, and `build.zig.zon`). Do not upgrade without a deliberate decision.
 - The code uses Zig 0.16 std APIs: `pub fn main(init: std.process.Init)`, `init.gpa`, `init.io`, `init.minimal.args`. Patterns from ≤0.15 (manual GeneralPurposeAllocator setup, `std.process.args()`) will not compile — copy existing style.
 - `wayland-scanner` generates C bindings from `protocols/*.xml` at build time (into the zig cache). `protocols/` holds vendored upstream XML only — don't hand-edit it, never commit generated C.
 - System deps: dev packages for `wayland-client`, `wayland-egl`, `EGL`, `GLESv2`, plus `wayland-scanner`.
@@ -42,6 +42,10 @@ Wayland rendering, IPC socket behavior, and GPU fallback **cannot be verified by
 
 ## Conventions
 
-- Commits: `<type>(<scope>): <description>` — types `feat`/`fix`/`test`/`docs`/`refactor`, scopes `ipc`/`ctl`/`config`/`renderer`/`build`/`repo`.
+- Commits: `<type>(<scope>): <description>`.
+- Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `bench`.
+  Use `bench` for benchmark harness/evidence commits and `perf` for retained
+  production performance changes.
+- Scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`, `app`, `security`.
 - Effects follow a naming pair: thin `<name>.zig` wrapper + `<name>_shader.zig` (GLSL). `colormix` is the CPU/SHM fallback effect; all others need the GPU path.
 - Minimal, atomic diffs. No refactors mixed with behavior changes. No speculative docs for unimplemented behavior.

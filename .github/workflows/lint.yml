@@ -13,7 +13,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Check formatting
-        run: zig fmt --check src/ tests/ build.zig
+        run: zig fmt --check build.zig bench src tests
 
   custom-checks:
     runs-on: ubuntu-latest
@@ -22,10 +22,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Zig pin consistency
+        run: |
+          set -euo pipefail
+          PIN=$(tr -d '[:space:]' < .zig-version)
+          test "$PIN" = "0.16.0"
+          grep -Fq ".minimum_zig_version = \"$PIN\"" build.zig.zon
+          for workflow in .github/workflows/*.yml; do
+            if grep -q 'mlugg/setup-zig' "$workflow"; then
+              grep -Fq "version: $PIN" "$workflow"
+            fi
+          done
+
       - name: Commit message format
         run: |
           set -euo pipefail
-          PATTERN='^(feat|fix|test|docs|refactor|perf)\((ipc|ctl|config|renderer|build|repo|app|security)\): .+'
+          PATTERN='^(feat|fix|test|docs|refactor|perf|bench)\((ipc|ctl|config|renderer|build|repo|app|security)\): .+'
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           else
@@ -47,7 +59,7 @@ jobs:
             echo "$BAD"
             echo ""
             echo "Expected: <type>(<scope>): <description>"
-            echo "  types:  feat, fix, test, docs, refactor, perf"
+            echo "  types:  feat, fix, test, docs, refactor, perf, bench"
             echo "  scopes: ipc, ctl, config, renderer, build, repo, app, security"
             exit 1
           fi

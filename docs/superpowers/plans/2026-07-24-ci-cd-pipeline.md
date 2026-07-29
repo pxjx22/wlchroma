@@ -12,7 +12,7 @@
 
 - Zig pinned to **0.16.0** (`.zig-version`)
 - System deps: `libegl1-mesa-dev libgles2-mesa-dev libwayland-bin libwayland-dev` (Ubuntu; wayland-scanner provided by libwayland-bin)
-- Commit format: `<type>(<scope>): <description>` with types `feat|fix|test|docs|refactor|perf` and scopes `ipc|ctl|config|renderer|build|repo|app|security`; merge commits exempt
+- Commit format: `<type>(<scope>): <description>`. Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `bench`. Use `bench` for benchmark harness/evidence commits and `perf` for retained production performance changes. Scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`, `app`, `security`; merge commits exempt
 - Release optimization: `ReleaseSafe`
 - Release trigger: tag matching `v*` (e.g. `v0.2.0`)
 - `softprops/action-gh-release@v2` for release uploads
@@ -45,7 +45,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Check formatting
-        run: zig fmt --check src/ tests/ build.zig
+        run: zig fmt --check build.zig bench src tests
 
   custom-checks:
     runs-on: ubuntu-latest
@@ -54,10 +54,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Zig pin consistency
+        run: |
+          set -euo pipefail
+          PIN=$(tr -d '[:space:]' < .zig-version)
+          test "$PIN" = "0.16.0"
+          grep -Fq ".minimum_zig_version = \"$PIN\"" build.zig.zon
+          for workflow in .github/workflows/*.yml; do
+            if grep -q 'mlugg/setup-zig' "$workflow"; then
+              grep -Fq "version: $PIN" "$workflow"
+            fi
+          done
+
       - name: Commit message format
         run: |
           set -euo pipefail
-          PATTERN='^(feat|fix|test|docs|refactor|perf)\((ipc|ctl|config|renderer|build|repo|app|security)\): .+'
+          PATTERN='^(feat|fix|test|docs|refactor|perf|bench)\((ipc|ctl|config|renderer|build|repo|app|security)\): .+'
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           else
@@ -79,7 +91,7 @@ jobs:
             echo "$BAD"
             echo ""
             echo "Expected: <type>(<scope>): <description>"
-            echo "  types:  feat, fix, test, docs, refactor, perf"
+            echo "  types:  feat, fix, test, docs, refactor, perf, bench"
             echo "  scopes: ipc, ctl, config, renderer, build, repo, app, security"
             exit 1
           fi
@@ -102,7 +114,7 @@ jobs:
 - [ ] **Step 2: Verify zig fmt passes locally**
 
 ```bash
-zig fmt --check src/ tests/ build.zig
+zig fmt --check build.zig bench src tests
 echo "exit: $?"
 ```
 

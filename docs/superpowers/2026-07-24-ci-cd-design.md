@@ -17,12 +17,13 @@ Replace the single minimal `.github/workflows/ci.yml` with three independent wor
 
 | Job | Steps |
 |-----|-------|
-| `fmt` | Checkout, install Zig 0.16.0 via `mlugg/setup-zig@v2`, run `zig fmt --check src/ tests/ build.zig` |
-| `custom-checks` | Runs on push and PR (not PR-only). Shell steps: commit message format validation (push events: all commits in the push range; PR events: all commits from base to head), TOML validity of `config.toml.example`, no committed build artifacts (`zig-out/`, `.zig-cache/`) |
+| `fmt` | Checkout, install Zig 0.16.0 via `mlugg/setup-zig@v2`, run `zig fmt --check build.zig bench src tests` |
+| `custom-checks` | Runs on push and PR (not PR-only). Shell steps: Zig pin consistency across `.zig-version`, `build.zig.zon`, and Zig-using workflows; commit message format validation (push events: all commits in the push range; PR events: all commits from base to head), TOML validity of `config.toml.example`, no committed build artifacts (`zig-out/`, `.zig-cache/`) |
 
 **Custom check details:**
 
-- Commit message format: enforces `<type>(<scope>): <description>` as documented in CONTRIBUTING.md. Accepted types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`. Accepted scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`, plus `app` and `security` (both appear in git history). Merge commits are exempt.
+- Commit message format: enforces `<type>(<scope>): <description>` as documented in CONTRIBUTING.md. Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `bench`. Use `bench` for benchmark harness/evidence commits and `perf` for retained production performance changes. Accepted scopes: `ipc`, `ctl`, `config`, `renderer`, `build`, `repo`, plus `app` and `security` (both appear in git history). Merge commits are exempt.
+- Zig pin consistency: `.zig-version`, `build.zig.zon`, and every workflow using `mlugg/setup-zig` must agree on Zig 0.16.0.
 - TOML check: validates `config.toml.example` is parseable (e.g. `python3 -c "import tomllib; tomllib.load(open('config.toml.example','rb'))"`)
 - Build artifact check: `git ls-files zig-out/ .zig-cache/` must return empty
 

@@ -81,6 +81,9 @@ When submitting or summarizing changes:
 ## Pull Request Hygiene
 
 - Use the repo commit convention: `<type>(<scope>): <description>`.
+- Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `bench`.
+  Use `bench` for benchmark harness/evidence commits and `perf` for retained
+  production performance changes.
 - Keep PRs small enough to review quickly.
 - Do not open cleanup-only PRs unless they are explicitly requested.
 - If the repo is dirty, avoid touching unrelated files.
