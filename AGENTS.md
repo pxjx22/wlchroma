@@ -12,6 +12,8 @@ Committed guidance: `README.md` (user-visible behavior), `CONTRIBUTING.md` (proc
 - `zig build test-ipc`, `zig build test-wayland-egl` — focused subsets.
 - `zig build run` — build + run the daemon (needs a live Wayland session).
 - Fault injection for shader-init failure paths: `zig build -Dphase3a-force-shader-init-failure=true`.
+- Reload fault builds: `zig build -Dphase3c-reload-delay-ms=1500` and
+  `zig build -Dphase3c-force-reload-timer-failure=true`.
 
 ## Toolchain gotchas
 

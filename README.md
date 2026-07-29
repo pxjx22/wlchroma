@@ -5,7 +5,7 @@ Animated, palette-driven wallpaper for Linux Wayland desktops. Renders shader ef
 ## Features
 
 - Eleven built-in effects — one CPU-rendered, ten GPU shader effects
-- Three-color palettes drive all effects; named palettes can be switched at runtime with config v2
+- Three-color palettes drive all effects; named palettes can be switched at runtime
 - Runs on compositors that expose `zwlr_layer_shell_v1` (`wlr-layer-shell`)
 - Falls back to a CPU/SHM path when EGL/GPU rendering is unavailable
 - Controllable at runtime via `wlchroma-ctl` or direct socket scripting
@@ -58,7 +58,14 @@ Load the given config file instead of the default XDG/HOME lookup.
 1. `$XDG_CONFIG_HOME/wlchroma/config.toml`
 2. `$HOME/.config/wlchroma/config.toml`
 
-If no config file exists, built-in defaults are used. There is a single config format; a top-level `version` key from older configs is accepted and ignored.
+If no config file exists, built-in defaults are used. There is a single config format; a top-level `version` key is optional and ignored.
+
+The file uses wlchroma's supported TOML subset: bare schema keys/sections,
+decimal numbers, single-line double-quoted UTF-8 strings, arrays of quoted
+strings, `#` comments outside strings, and `[[palettes]]`. Recognized strings
+do not support TOML escapes; any backslash in one is rejected. Files must be
+valid UTF-8 and may not contain ASCII control bytes other than tab and CRLF/LF
+line endings.
 
 Copy the example config to get started:
 
@@ -120,7 +127,7 @@ name = "nord"
 colors = ["#88c0d0", "#81a1c1", "#5e81ac"]
 ```
 
-Palette names must be unique. The initial colors come from `[effect.settings].palette`; named palettes are activated only via IPC.
+Palette names must be unique and contain 1–63 UTF-8 bytes. The initial colors come from `[effect.settings].palette`; named palettes are activated only via IPC.
 
 ## Runtime Control
 
@@ -135,12 +142,19 @@ Palette names must be unique. The initial colors come from `[effect.settings].pa
 | `wlchroma-ctl query` | Print current effect, fps, scale, and active palette |
 | `wlchroma-ctl set-fps <1-240>` | Change frame rate (runtime range is wider than config) |
 | `wlchroma-ctl set-scale <scale>` | Change render scale (`0.1`–`1.0`, applies immediately; GPU path only) |
-| `wlchroma-ctl set-palette <name>` | Switch to a named palette (config v2 required) |
+| `wlchroma-ctl set-palette <name>` | Switch to a named palette |
 | `wlchroma-ctl set-colors <#rrggbb> <#rrggbb> <#rrggbb> [fade_ms]` | Set the palette to three arbitrary colors live (no config file); optional fade duration glides to them |
 | `wlchroma-ctl reload` | Re-read config file and apply all changes (effect, speed, fps, palette, scale, filter) |
 | `wlchroma-ctl stop` | Shut down wlchroma gracefully |
 
 Exit codes: `0` on success, `1` on error (errors printed to stderr).
+
+Reload file reading and parsing run on a transient background worker so
+animation, Wayland events, signals, and other IPC remain responsive. Only one
+reload may be in progress; another receives
+`error: reload already in progress`. The response remains completion-confirmed:
+`ok` is written only after the snapshot is applied, and an error leaves the
+previous runtime state unchanged.
 
 **Runtime vs. config ranges:**
 - `set-fps` accepts `1`–`240` at runtime; config file `fps` is limited to `1`–`120`.
@@ -161,7 +175,7 @@ echo 'query' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
 # change fps
 echo 'set-fps 60' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
 
-# switch palette (config v2)
+# switch palette
 echo 'set-palette ocean' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/wlchroma.sock"
 
 # push three arbitrary colors live (no config file)
