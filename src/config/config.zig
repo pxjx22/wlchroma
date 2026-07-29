@@ -178,6 +178,33 @@ fn resolveConfigPath(allocator: std.mem.Allocator, environ: std.process.Environ)
 }
 
 const MAX_SEEN_KEYS = 64;
+const MAX_PALETTES = 64;
+
+const ParseError = error{
+    MalformedConfig,
+    DuplicateConfigEntry,
+    InvalidValue,
+    UnsupportedPolicy,
+    UnsupportedEffect,
+};
+
+const ParsedDocument = struct {
+    config: AppConfig,
+    palettes: [MAX_PALETTES]NamedPalette,
+    palette_count: usize,
+};
+
+fn finalizePalette(
+    document: *ParsedDocument,
+    current: *const NamedPalette,
+    has_name: bool,
+    has_colors: bool,
+) ParseError!void {
+    if (!has_name or !has_colors) return error.MalformedConfig;
+    if (document.palette_count >= document.palettes.len) return error.MalformedConfig;
+    document.palettes[document.palette_count] = current.*;
+    document.palette_count += 1;
+}
 /// Scales in [this, 1.0) are rejected as visually indistinguishable from
 /// native while still paying the offscreen-FBO cost. Shared by config
 /// validation and the IPC set-scale handler so both enforce the same rule.
@@ -226,21 +253,42 @@ const SeenKeys = struct {
     }
 };
 
-fn parseAndValidate(content: []const u8) !AppConfig {
+fn parseAndValidate(content: []const u8) ParseError!AppConfig {
+    return (try parseDocument(content)).config;
+}
+
+fn parseDocument(content: []const u8) ParseError!ParsedDocument {
+    return parseDocumentObserved(content, null);
+}
+
+fn parseDocumentObserved(
+    content: []const u8,
+    line_visits: ?*usize,
+) ParseError!ParsedDocument {
     try validateDocumentBytes(content);
 
-    var config = defaultConfig();
+    var document = ParsedDocument{
+        .config = defaultConfig(),
+        .palettes = undefined,
+        .palette_count = 0,
+    };
 
     // Current section path, e.g. "" for top-level, "outputs", "effect", "effect.settings"
     var section: Section = .top;
     var section_name: []const u8 = "";
     var seen_sections = SeenNames{ .buf = undefined, .len = 0 };
     var seen_keys = SeenKeys{ .buf = undefined, .len = 0 };
+    var seen_palette_names = SeenNames{ .buf = undefined, .len = 0 };
+    var current_palette = std.mem.zeroes(NamedPalette);
+    var palette_active = false;
+    var palette_has_name = false;
+    var palette_has_colors = false;
 
     var line_num: usize = 0;
     var iter = std.mem.splitScalar(u8, content, '\n');
     while (iter.next()) |raw_line| {
         line_num += 1;
+        if (line_visits) |visits| visits.* += 1;
         const line = stripComment(std.mem.trim(u8, raw_line, &std.ascii.whitespace));
 
         if (line.len == 0) continue;
@@ -251,6 +299,24 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                 std.debug.print("config: line {}: malformed section header\n", .{line_num});
                 return error.MalformedConfig;
             };
+            if (palette_active) {
+                finalizePalette(
+                    &document,
+                    &current_palette,
+                    palette_has_name,
+                    palette_has_colors,
+                ) catch |err| {
+                    if (!palette_has_name or !palette_has_colors) {
+                        std.debug.print("config: [[palettes]] entry before line {} is missing name or colors\n", .{line_num});
+                    } else {
+                        std.debug.print("config: too many [[palettes]] entries (max {})\n", .{MAX_PALETTES});
+                    }
+                    return err;
+                };
+                palette_active = false;
+                palette_has_name = false;
+                palette_has_colors = false;
+            }
             if (shouldTrackSection(parsed_section.section)) {
                 seen_sections.add(parsed_section.name) catch |err| switch (err) {
                     error.DuplicateConfigEntry => {
@@ -265,6 +331,10 @@ fn parseAndValidate(content: []const u8) !AppConfig {
             }
             section = parsed_section.section;
             section_name = parsed_section.name;
+            if (section == .palettes_entry) {
+                current_palette = std.mem.zeroes(NamedPalette);
+                palette_active = true;
+            }
             continue;
         }
 
@@ -303,8 +373,8 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         return error.InvalidValue;
                     }
                     const fps_u32: u32 = @intCast(fps);
-                    config.fps = fps_u32;
-                    config.frame_interval_ns = 1_000_000_000 / fps_u32;
+                    document.config.fps = fps_u32;
+                    document.config.frame_interval_ns = 1_000_000_000 / fps_u32;
                 } else {
                     std.debug.print("config: line {}: ignoring unknown top-level key '{s}'\n", .{ line_num, kv.key });
                 }
@@ -333,7 +403,7 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         return error.InvalidValue;
                     };
                     if (std.meta.stringToEnum(EffectType, val)) |effect_type| {
-                        config.effect_type = effect_type;
+                        document.config.effect_type = effect_type;
                     } else {
                         std.debug.print("config: unknown effect name \"{s}\"\n", .{val});
                         return error.UnsupportedEffect;
@@ -352,7 +422,7 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         std.debug.print("config: line {}: 'effect.settings.speed' must be between 0.25 and 2.5, got {d}\n", .{ line_num, speed });
                         return error.InvalidValue;
                     }
-                    config.speed = speed;
+                    document.config.speed = speed;
                 } else if (std.mem.eql(u8, kv.key, "palette")) {
                     const colors = parseStringArray(kv.value) orelse {
                         std.debug.print("config: line {}: 'palette' must be an array of exactly 3 quoted '#RRGGBB' strings\n", .{line_num});
@@ -363,7 +433,7 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         return error.InvalidValue;
                     }
                     for (colors.items(), 0..) |color_str, i| {
-                        config.palette[i] = parseHexColor(color_str) orelse {
+                        document.config.palette[i] = parseHexColor(color_str) orelse {
                             std.debug.print("config: line {}: 'palette' entry {} must be a '#RRGGBB' color, got \"{s}\"\n", .{ line_num, i + 1, color_str });
                             return error.InvalidValue;
                         };
@@ -386,16 +456,16 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                         std.debug.print("config: line {}: 'renderer.scale' values from {d} up to but not including 1.0 are too close to native; use a value below {d} or exactly 1.0\n", .{ line_num, RENDERER_SCALE_NEAR_NATIVE_MIN, RENDERER_SCALE_NEAR_NATIVE_MIN });
                         return error.InvalidValue;
                     }
-                    config.renderer_scale = scale;
+                    document.config.renderer_scale = scale;
                 } else if (std.mem.eql(u8, kv.key, "upscale_filter")) {
                     const val = parseQuotedString(kv.value) orelse {
                         std.debug.print("config: line {}: 'renderer.upscale_filter' must be \"nearest\" or \"linear\"\n", .{line_num});
                         return error.InvalidValue;
                     };
                     if (std.mem.eql(u8, val, "nearest")) {
-                        config.upscale_filter = .nearest;
+                        document.config.upscale_filter = .nearest;
                     } else if (std.mem.eql(u8, val, "linear")) {
-                        config.upscale_filter = .linear;
+                        document.config.upscale_filter = .linear;
                     } else {
                         std.debug.print("config: line {}: 'renderer.upscale_filter' must be \"nearest\" or \"linear\", got \"{s}\"\n", .{ line_num, val });
                         return error.InvalidValue;
@@ -405,8 +475,52 @@ fn parseAndValidate(content: []const u8) !AppConfig {
                 }
             },
             .palettes_entry => {
-                // Palette entries are parsed in parseAndValidateFull.
-                // The plain (non-full) parser ignores them.
+                if (std.mem.eql(u8, kv.key, "name")) {
+                    if (palette_has_name) {
+                        std.debug.print("config: line {}: duplicate 'name' in [[palettes]] entry\n", .{line_num});
+                        return error.DuplicateConfigEntry;
+                    }
+                    const name = parseQuotedString(kv.value) orelse {
+                        std.debug.print("config: line {}: [[palettes]] name must be a quoted string\n", .{line_num});
+                        return error.InvalidValue;
+                    };
+                    if (name.len == 0 or name.len > 63) {
+                        std.debug.print("config: line {}: [[palettes]] name must be 1–63 characters\n", .{line_num});
+                        return error.InvalidValue;
+                    }
+                    seen_palette_names.add(name) catch |err| switch (err) {
+                        error.DuplicateConfigEntry => {
+                            std.debug.print("config: line {}: duplicate palette name \"{s}\"\n", .{ line_num, name });
+                            return error.DuplicateConfigEntry;
+                        },
+                        else => return err,
+                    };
+                    @memcpy(current_palette.name[0..name.len], name);
+                    current_palette.name_len = name.len;
+                    palette_has_name = true;
+                } else if (std.mem.eql(u8, kv.key, "colors")) {
+                    if (palette_has_colors) {
+                        std.debug.print("config: line {}: duplicate 'colors' in [[palettes]] entry\n", .{line_num});
+                        return error.DuplicateConfigEntry;
+                    }
+                    const colors = parseStringArray(kv.value) orelse {
+                        std.debug.print("config: line {}: [[palettes]] colors must be an array of 3 '#RRGGBB' strings\n", .{line_num});
+                        return error.InvalidValue;
+                    };
+                    if (colors.len != 3) {
+                        std.debug.print("config: line {}: [[palettes]] colors must have exactly 3 entries, got {}\n", .{ line_num, colors.len });
+                        return error.InvalidValue;
+                    }
+                    for (colors.items(), 0..) |color_str, i| {
+                        current_palette.colors[i] = parseHexColor(color_str) orelse {
+                            std.debug.print("config: line {}: [[palettes]] color {} must be '#RRGGBB', got \"{s}\"\n", .{ line_num, i + 1, color_str });
+                            return error.InvalidValue;
+                        };
+                    }
+                    palette_has_colors = true;
+                } else {
+                    std.debug.print("config: line {}: ignoring unknown key 'palettes.{s}'\n", .{ line_num, kv.key });
+                }
             },
             .unknown => {
                 // Ignore keys in unknown sections
@@ -414,133 +528,34 @@ fn parseAndValidate(content: []const u8) !AppConfig {
         }
     }
 
-    return config;
+    if (palette_active) {
+        finalizePalette(
+            &document,
+            &current_palette,
+            palette_has_name,
+            palette_has_colors,
+        ) catch |err| {
+            if (!palette_has_name or !palette_has_colors) {
+                std.debug.print("config: [[palettes]] entry at end of file is missing name or colors\n", .{});
+            } else {
+                std.debug.print("config: too many [[palettes]] entries (max {})\n", .{MAX_PALETTES});
+            }
+            return err;
+        };
+    }
+
+    return document;
 }
 
-/// Like parseAndValidate but also collects [[palettes]] entries.
+/// Like parseAndValidate but also returns [[palettes]] entries.
 /// The returned palettes slice is heap-allocated; caller must free it.
-fn parseAndValidateFull(allocator: std.mem.Allocator, content: []const u8) !LoadResult {
-    // Parse the base config using the existing logic.
-    const config = try parseAndValidate(content);
-
-    // Second pass: collect [[palettes]] entries.
-    const MAX_PALETTES = 64;
-    var palette_buf: [MAX_PALETTES]NamedPalette = undefined;
-    var palette_count: usize = 0;
-
-    var in_palette = false;
-    var cur_has_name = false;
-    var cur_has_colors = false;
-    var cur: NamedPalette = undefined;
-    var seen_palette_names = SeenNames{ .buf = undefined, .len = 0 };
-    var line_num: usize = 0;
-
-    var iter = std.mem.splitScalar(u8, content, '\n');
-    while (iter.next()) |raw_line| {
-        line_num += 1;
-        const line = stripComment(std.mem.trim(u8, raw_line, &std.ascii.whitespace));
-        if (line.len == 0) continue;
-
-        if (line[0] == '[') {
-            // Flush any complete in-progress palette entry.
-            if (in_palette) {
-                if (!cur_has_name or !cur_has_colors) {
-                    std.debug.print("config: [[palettes]] entry before line {} is missing name or colors\n", .{line_num});
-                    return error.MalformedConfig;
-                }
-                if (palette_count >= MAX_PALETTES) return error.MalformedConfig;
-                palette_buf[palette_count] = cur;
-                palette_count += 1;
-                in_palette = false;
-                cur_has_name = false;
-                cur_has_colors = false;
-            }
-
-            const parsed = parseSectionHeader(line) orelse continue;
-            if (parsed.section == .palettes_entry) {
-                if (palette_count >= MAX_PALETTES) {
-                    std.debug.print("config: too many [[palettes]] entries (max {})\n", .{MAX_PALETTES});
-                    return error.MalformedConfig;
-                }
-                in_palette = true;
-                cur = std.mem.zeroes(NamedPalette);
-            } else {
-                in_palette = false;
-            }
-            continue;
-        }
-
-        if (!in_palette) continue;
-
-        const kv = parseKeyValue(line) orelse {
-            std.debug.print("config: line {}: malformed key-value in [[palettes]]\n", .{line_num});
-            return error.MalformedConfig;
-        };
-
-        if (std.mem.eql(u8, kv.key, "name")) {
-            if (cur_has_name) {
-                std.debug.print("config: line {}: duplicate 'name' in [[palettes]] entry\n", .{line_num});
-                return error.DuplicateConfigEntry;
-            }
-            const s = parseQuotedString(kv.value) orelse {
-                std.debug.print("config: line {}: [[palettes]] name must be a quoted string\n", .{line_num});
-                return error.InvalidValue;
-            };
-            if (s.len == 0 or s.len > 63) {
-                std.debug.print("config: line {}: [[palettes]] name must be 1–63 characters\n", .{line_num});
-                return error.InvalidValue;
-            }
-            // Check for duplicate palette names.
-            seen_palette_names.add(s) catch |err| switch (err) {
-                error.DuplicateConfigEntry => {
-                    std.debug.print("config: line {}: duplicate palette name \"{s}\"\n", .{ line_num, s });
-                    return error.DuplicateConfigEntry;
-                },
-                else => return err,
-            };
-            cur.name = std.mem.zeroes([64:0]u8);
-            @memcpy(cur.name[0..s.len], s);
-            cur.name_len = s.len;
-            cur_has_name = true;
-        } else if (std.mem.eql(u8, kv.key, "colors")) {
-            if (cur_has_colors) {
-                std.debug.print("config: line {}: duplicate 'colors' in [[palettes]] entry\n", .{line_num});
-                return error.DuplicateConfigEntry;
-            }
-            const arr = parseStringArray(kv.value) orelse {
-                std.debug.print("config: line {}: [[palettes]] colors must be an array of 3 '#RRGGBB' strings\n", .{line_num});
-                return error.InvalidValue;
-            };
-            if (arr.len != 3) {
-                std.debug.print("config: line {}: [[palettes]] colors must have exactly 3 entries, got {}\n", .{ line_num, arr.len });
-                return error.InvalidValue;
-            }
-            for (arr.items(), 0..) |color_str, i| {
-                cur.colors[i] = parseHexColor(color_str) orelse {
-                    std.debug.print("config: line {}: [[palettes]] color {} must be '#RRGGBB', got \"{s}\"\n", .{ line_num, i + 1, color_str });
-                    return error.InvalidValue;
-                };
-            }
-            cur_has_colors = true;
-        } else {
-            std.debug.print("config: line {}: ignoring unknown key 'palettes.{s}'\n", .{ line_num, kv.key });
-        }
-    }
-
-    // Flush the last in-progress entry.
-    if (in_palette) {
-        if (!cur_has_name or !cur_has_colors) {
-            std.debug.print("config: [[palettes]] entry at end of file is missing name or colors\n", .{});
-            return error.MalformedConfig;
-        }
-        if (palette_count >= MAX_PALETTES) return error.MalformedConfig;
-        palette_buf[palette_count] = cur;
-        palette_count += 1;
-    }
-
-    // Copy results to heap-allocated slice.
-    const palettes = try allocator.dupe(NamedPalette, palette_buf[0..palette_count]);
-    return LoadResult{ .config = config, .palettes = palettes };
+fn parseAndValidateFull(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+) (ParseError || std.mem.Allocator.Error)!LoadResult {
+    const document = try parseDocument(content);
+    const palettes = try allocator.dupe(NamedPalette, document.palettes[0..document.palette_count]);
+    return .{ .config = document.config, .palettes = palettes };
 }
 
 const Section = enum {
@@ -570,7 +585,7 @@ fn shouldTrackKey(section: Section, key: []const u8) bool {
         .effect => std.mem.eql(u8, key, "name"),
         .effect_settings => std.mem.eql(u8, key, "palette") or std.mem.eql(u8, key, "speed"),
         .renderer => std.mem.eql(u8, key, "scale") or std.mem.eql(u8, key, "upscale_filter"),
-        // palettes_entry keys are tracked per-entry in parseAndValidateFull.
+        // palettes_entry keys are tracked per-entry in parseDocument.
         .palettes_entry, .unknown => false,
     };
 }
@@ -1172,4 +1187,75 @@ test "parseAndValidateFull keeps hashes in quoted palettes while removing commen
     try std.testing.expectEqualStrings("ocean#night", result.palettes[0].nameSlice());
     try std.testing.expectEqual(@as(u8, 0x00), result.palettes[0].colors[0].r);
     try std.testing.expectEqual(@as(u8, 0xef), result.palettes[0].colors[2].b);
+}
+
+fn parseDocumentWithPaletteCount(palette_count: usize) !ParsedDocument {
+    var toml: std.ArrayList(u8) = .empty;
+    defer toml.deinit(std.testing.allocator);
+
+    for (0..palette_count) |i| {
+        try toml.print(std.testing.allocator,
+            "[[palettes]]\nname = \"palette-{}\"\ncolors = [\"#010203\", \"#040506\", \"#070809\"]\n",
+            .{i},
+        );
+    }
+    return parseDocument(toml.items);
+}
+
+test "parseDocument accepts palette-count boundaries" {
+    const zero = try parseDocumentWithPaletteCount(0);
+    try std.testing.expectEqual(@as(usize, 0), zero.palette_count);
+
+    const one = try parseDocumentWithPaletteCount(1);
+    try std.testing.expectEqual(@as(usize, 1), one.palette_count);
+    try std.testing.expectEqualStrings("palette-0", one.palettes[0].nameSlice());
+
+    const max = try parseDocumentWithPaletteCount(64);
+    try std.testing.expectEqual(@as(usize, 64), max.palette_count);
+    try std.testing.expectEqualStrings("palette-63", max.palettes[63].nameSlice());
+
+    try std.testing.expectError(error.MalformedConfig, parseDocumentWithPaletteCount(65));
+}
+
+test "parseDocument finalizes palettes at section transition and EOF" {
+    const toml =
+        "[[palettes]]\n" ++
+        "name = \"one\"\n" ++
+        "colors = [\"#010203\", \"#040506\", \"#070809\"]\n" ++
+        "[renderer]\n" ++
+        "scale = 0.5\n" ++
+        "[[palettes]]\n" ++
+        "name = \"two\"\n" ++
+        "colors = [\"#111213\", \"#141516\", \"#171819\"]\n";
+    const document = try parseDocument(toml);
+    try std.testing.expectEqual(@as(usize, 2), document.palette_count);
+    try std.testing.expectEqualStrings("one", document.palettes[0].nameSlice());
+    try std.testing.expectEqualStrings("two", document.palettes[1].nameSlice());
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), document.config.renderer_scale, 0.001);
+}
+
+test "parseDocument rejects incomplete palette before section transition" {
+    const toml = "[[palettes]]\nname = \"one\"\n[renderer]\nscale = 0.5\n";
+    try std.testing.expectError(error.MalformedConfig, parseDocument(toml));
+}
+
+test "parseDocument rejects incomplete palette at EOF" {
+    const toml = "[[palettes]]\nname = \"one\"\n";
+    try std.testing.expectError(error.MalformedConfig, parseDocument(toml));
+}
+
+test "parseDocument rejects duplicate keys in one repeated palette entry" {
+    const toml =
+        "[[palettes]]\n" ++
+        "name = \"one\"\n" ++
+        "name = \"two\"\n" ++
+        "colors = [\"#010203\", \"#040506\", \"#070809\"]\n";
+    try std.testing.expectError(error.DuplicateConfigEntry, parseDocument(toml));
+}
+
+test "parseDocument visits each input line once" {
+    const toml = "fps = 30\n[effect]\nname = \"colormix\"\n[[palettes]]\nname = \"one\"\ncolors = [\"#010203\", \"#040506\", \"#070809\"]";
+    var line_visits: usize = 0;
+    _ = try parseDocumentObserved(toml, &line_visits);
+    try std.testing.expectEqual(@as(usize, 6), line_visits);
 }
