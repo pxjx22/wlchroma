@@ -54,15 +54,15 @@ Each phase receives its own approved design, TDD implementation plan, focused co
 | GPU-M4 | Medium | 3 | Palette uploads can be lost when no EGL context is current | Fixed (`510eddf`, `43e6f36`) |
 | GPU-M5 | Medium | 3 | Switching to colormix leaves pattern uniforms at defaults | Fixed (`f164387`, `43e6f36`) |
 | GPU-M6 | Medium | 3 | Colormix shader failure produces a black EGL surface instead of SHM fallback | Fixed (`a145eb7`, `85b7ce5`, `d9cdb26`) |
-| RENDER-M1 | Medium | 3 | Runtime speed changes jump GPU phase and CPU colormix ignores speed | Open |
-| RENDER-L1 | Low | 3 | `renderGrid` relies on callers to provide an exact output length | Open |
+| RENDER-M1 | Medium | 3 | Runtime speed changes jump GPU phase and CPU colormix ignores speed | Fixed (`6fda05c`, `76af09d`, `3628bb7`, `c0b4bd8`, `0b916bc`) |
+| RENDER-L1 | Low | 3 | `renderGrid` relies on callers to provide an exact output length | Fixed (`3295002`) |
 | APP-L2 | Low | 3 | Reload silently ignores `timerfd_settime` failure | Open |
 | PERF-L1 | Low | 3 | Reload performs synchronous file I/O and two parser passes on the render loop | Open |
-| PERF-L2 | Low | 3 | CPU fallback resolves and updates its effect twice per frame | Open |
-| PERF-L3 | Low | 3 | CPU fallback reads the monotonic clock separately for every output | Open |
-| PERF-L4 | Low | 3 | Colormix repeats invariant integer conversions inside the inner loop | Open |
-| PERF-L5 | Low | 3 | Column-major cells create strided reads during framebuffer expansion | Open |
-| PERF-L6 | Low | 3 | Ever-growing frame counts lose `f32` animation precision after long uptime | Open |
+| PERF-L2 | Low | 3 | CPU fallback resolves and updates its effect twice per frame | Fixed (`7bd7cb8`) |
+| PERF-L3 | Low | 3 | CPU fallback reads the monotonic clock separately for every output | Fixed (`3628bb7`) |
+| PERF-L4 | Low | 3 | Colormix repeats invariant integer conversions inside the inner loop | Fixed (`88fa502`) |
+| PERF-L5 | Low | 3 | Column-major cells create strided reads during framebuffer expansion | Fixed (`88fa502`) |
+| PERF-L6 | Low | 3 | Ever-growing frame counts lose `f32` animation precision after long uptime | Fixed (`6fda05c`, `76af09d`, `3628bb7`) |
 | CONF-L1 | Low | 3 | The custom TOML parser accepts a documented subset but does not define escape semantics | Open |
 | BUILD-L1 | Low | 3 | `build.zig.zon` still declares Zig 0.15.2 | Open |
 
@@ -227,3 +227,105 @@ Update the finding ledger and append phase verification evidence as fixes land. 
 - **Forced-failure live acceptance:** isolated fault PID `283830` selected `colormix`, logged `error.Phase3aForcedShaderInitFailure` exactly once, then configured SHM exactly once at `1920x1200 grid=192x75`. Its fd table contained `wlchroma-shm` and no `/dev/dri` descriptor, directly evidencing the closed EGL epoch and SHM ownership rather than a retained black EGL clear path. Three IPC queries across multiple ticks succeeded; no retry, resource, ownership, allocation, makeCurrent, or additional EGL failure appeared.
 - **Live limitations:** desktop screenshot capture was rejected by the approval layer because it could expose unrelated on-screen content, so visible two-frame difference, immediate colormix pattern, post-watchdog palette pixels, and forced-SHM non-black pixels are not claimed. Only one physical output was available, so live multi-output rendering and upload counting were unavailable; deterministic tests cover first-current-surface consumption and second-clean-surface behavior.
 - **Shutdown, restoration, and cleanup:** both isolated daemons stopped through their exact temporary IPC socket. The user's exact original executable `/home/px/wlchroma/zig-out/bin/wlchroma`, no-argument config resolution, `/home/px` cwd, `/run/user/1000/wlchroma.sock`, and `wlchroma-session-restore.service` were restored as PID `286879`; query returned colormix, 24 FPS, scale `0.20`, custom palette. The original config SHA-256 remained `052350188d4e83ef694ac39edb6762394b4f77fc650a00d69219c1e2f9ff8aa1`, `eDP-1` returned to its original mode and scale, all test/recovery units were collected, and the temporary runtime/config were removed.
+
+### Phase 3B: Animation and CPU performance — 2026-07-22 to 2026-07-27
+
+- **Disposition:** `RENDER-M1`, `RENDER-L1`, `PERF-L2`, `PERF-L3`, `PERF-L4`, `PERF-L5`, and `PERF-L6` are fixed. Their original descriptions remain unchanged in the ledger.
+- **Implementation commits:** `f0a8a90` added the allocation-free ReleaseFast CPU benchmark; `6fda05c` and `76af09d` added bounded, maximum-`u64`-safe shared animation state; `3628bb7`, `c0b4bd8`, and `0b916bc` made App timerfd expirations authoritative while preserving fallback continuity; `7bd7cb8` made CPU stand-in resolution change-driven; `3295002` added checked typed grid/SHM layouts; and `88fa502` made the grid row-major, cached the blended palette, and hoisted invariant work. The optional row-linear framebuffer candidate failed its benchmark gate, was fully removed, and has no commit.
+- **Structural evidence:** one accepted exact timerfd record produces one global `AnimationState.advance` call and zero animation clock reads. Every surface borrows the same App-owned `f64` phase. Normal no-fade ReleaseSafe/ReleaseFast ticks make zero render-path clock samples; Debug telemetry deliberately makes two, and an active fade makes one. Each SHM render or configure operation resolves its CPU effect once. An established GPU-only stand-in rebuilds its palette zero times when stable and once when changed; first construction rebuilds once. Checked layouts validate products and exact slice lengths before writing, and row-major production/consumption plus cached palette conversion removes the audited inner-loop work without adding per-frame allocation.
+- **Static evidence:** removed timing and column-major forms have no production match; the two `CpuStandin.resolve` sites are exactly the SHM render/configure helpers; renderer/Wayland tick paths contain no animation clock read. `zig fmt --check build.zig bench src tests`, `git diff --check`, and the meaningful whole-range `git diff --check 5bdc843` exited zero. Whole-branch review had found one terminal blank line that the earlier bare clean-worktree check could not inspect; the closeout change removes it and corrects that evidence boundary.
+- **Automated verification:** Debug install passed `10/10` steps; focused Wayland/EGL passed `27/27` steps and `70/70` tests; the Debug full graph passed `53/53` steps and `202/202` tests; direct config parsing passed `46/46` tests. ReleaseSafe and ReleaseFast each passed a `10/10` install and a `53/53`, `202/202` full graph. Aggregate evidence is `216/216` reported build steps and `722/722` test executions.
+- **Benchmark method:** the benchmark modules run ReleaseFast with three warm-up batches, nine measured batches, 16 frames per batch, and all allocations outside timing. The baseline command, run twice, was `ZIG_GLOBAL_CACHE_DIR=/tmp/wlchroma-phase3b-bench-base zig build bench-cpu`; the retained Task 6 command was `ZIG_GLOBAL_CACHE_DIR=/tmp/wlchroma-phase3b-bench-head zig build bench-cpu`. Positive nominal change below means the retained Task 6 invocation was faster than the arithmetic midpoint of the two baseline invocation medians. The midpoint is transparent comparison evidence, not a statistical confidence claim.
+
+| Case | Phase | Baseline 1 ns | Baseline 2 ns | Midpoint ns | Task 6 ns | Change | Checksum |
+|---|---|---:|---:|---:|---:|---:|---|
+| 1920x1200-1 | grid | 26,204,929 | 24,826,119 | 25,515,524.0 | 24,887,230 | +2.4624% | `60dc464a322602f8` |
+| 1920x1200-1 | expand | 26,680,130 | 26,402,441 | 26,541,285.5 | 29,675,218 | -11.8078% | `159d1fe211803e25` |
+| 1920x1200-1 | combined-stable | 54,279,024 | 55,010,823 | 54,644,923.5 | 52,688,474 | +3.5803% | `159d1fe211803e25` |
+| 1920x1200-1 | combined-changing | 53,958,243 | 56,229,626 | 55,093,934.5 | 66,596,570 | -20.8782% | `161cbca554f44d65` |
+| 1920x1200-2 | grid | 53,470,261 | 52,413,699 | 52,941,980.0 | 49,741,913 | +6.0445% | `f0df5948e95856c5` |
+| 1920x1200-2 | expand | 55,824,825 | 58,659,828 | 57,242,326.5 | 60,709,034 | -6.0562% | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-stable | 113,109,825 | 115,251,234 | 114,180,529.5 | 114,413,592 | -0.2041% | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-changing | 113,168,214 | 110,782,429 | 111,975,321.5 | 115,265,266 | -2.9381% | `7f9df58238c106a5` |
+| 2560x1440-1 | grid | 42,448,512 | 45,333,453 | 43,890,982.5 | 37,813,953 | +13.8457% | `b148206e5b384440` |
+| 2560x1440-1 | expand | 45,881,359 | 47,868,348 | 46,874,853.5 | 48,794,834 | -4.0960% | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-stable | 89,556,427 | 94,206,121 | 91,881,274.0 | 90,803,872 | +1.1726% | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-changing | 89,738,573 | 93,111,775 | 91,425,174.0 | 88,364,724 | +3.3475% | `a39f82258c9b2de5` |
+| 2560x1440-2 | grid | 84,380,617 | 86,886,527 | 85,633,572.0 | 76,859,388 | +10.2462% | `9dffe745f60b33f1` |
+| 2560x1440-2 | expand | 93,646,970 | 100,108,979 | 96,877,974.5 | 102,529,565 | -5.8337% | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-stable | 183,321,011 | 192,559,287 | 187,940,149.0 | 184,298,749 | +1.9375% | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-changing | 184,861,433 | 192,649,591 | 188,755,512.0 | 179,740,755 | +4.7759% | `fa66637d705ef7a5` |
+| 3840x2160-1 | grid | 97,831,661 | 97,687,227 | 97,759,444.0 | 89,060,506 | +8.8983% | `40e37f5192cecd83` |
+| 3840x2160-1 | expand | 93,696,837 | 107,517,830 | 100,607,333.5 | 110,887,050 | -10.2177% | `adb87702b24cb725` |
+| 3840x2160-1 | combined-stable | 201,595,024 | 209,220,382 | 205,407,703.0 | 197,782,404 | +3.7123% | `adb87702b24cb725` |
+| 3840x2160-1 | combined-changing | 201,885,914 | 205,241,165 | 203,563,539.5 | 198,796,464 | +2.3418% | `b94c0977f04020a5` |
+| 3840x2160-2 | grid | 190,832,038 | 197,222,041 | 194,027,039.5 | 178,714,543 | +7.8919% | `3af178037c9269b1` |
+| 3840x2160-2 | expand | 215,371,039 | 223,606,253 | 219,488,646.0 | 215,466,524 | +1.8325% | `772f44f448774b25` |
+| 3840x2160-2 | combined-stable | 410,343,977 | 418,364,776 | 414,354,376.5 | 438,357,702 | -5.7929% | `772f44f448774b25` |
+| 3840x2160-2 | combined-changing | 406,285,909 | 418,081,638 | 412,183,773.5 | 386,398,884 | +6.2557% | `868ffb15a13be425` |
+
+- **Retained benchmark interpretation:** all six grid workloads improved nominally by `+2.4624%` to `+13.8457%`; expansion ranged from `-11.8078%` to `+1.8325%`; combined-stable ranged from `-5.7929%` to `+3.7123%`; and combined-changing ranged from `-20.8782%` to `+6.2557%`. All 24 retained checksums matched the baseline exactly, which is deterministic output-equivalence evidence. The two baseline runs had a `3.8398%` mean pairwise relative spread and `13.7376%` maximum spread under the `powersave` governor, so these timings do not prove a general wall-clock speedup.
+- **Optional Task 7 gate:** three fresh retained-head runs and three row-linear candidate runs used separate caches; every one of the six invocations produced all 24 labels, all 144 checksums matched, and no timed allocation was introduced. Positive change below means the candidate median-of-three invocation medians was faster.
+
+| Case | Phase | Retained median ns | Candidate median ns | Change | Checksum |
+|---|---|---:|---:|---:|---|
+| 1920x1200-1 | grid | 40,893,000 | 31,278,942 | +23.5103% | `60dc464a322602f8` |
+| 1920x1200-1 | expand | 48,113,209 | 41,513,981 | +13.7160% | `159d1fe211803e25` |
+| 1920x1200-1 | combined-stable | 76,939,088 | 68,654,290 | +10.7680% | `159d1fe211803e25` |
+| 1920x1200-1 | combined-changing | 82,757,339 | 73,692,378 | +10.9537% | `161cbca554f44d65` |
+| 1920x1200-2 | grid | 70,637,232 | 65,327,436 | +7.5170% | `f0df5948e95856c5` |
+| 1920x1200-2 | expand | 83,640,640 | 89,507,790 | -7.0147% | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-stable | 149,218,936 | 140,915,870 | +5.5644% | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-changing | 128,045,241 | 140,377,875 | -9.6315% | `7f9df58238c106a5` |
+| 2560x1440-1 | grid | 40,192,087 | 47,941,568 | -19.2811% | `b148206e5b384440` |
+| 2560x1440-1 | expand | 51,977,370 | 57,710,962 | -11.0309% | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-stable | 109,517,202 | 120,193,564 | -9.7486% | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-changing | 103,891,817 | 112,009,631 | -7.8137% | `a39f82258c9b2de5` |
+| 2560x1440-2 | grid | 107,623,401 | 115,759,060 | -7.5594% | `9dffe745f60b33f1` |
+| 2560x1440-2 | expand | 114,628,056 | 144,834,772 | -26.3519% | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-stable | 227,459,522 | 264,518,805 | -16.2927% | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-changing | 195,290,173 | 236,585,512 | -21.1456% | `fa66637d705ef7a5` |
+| 3840x2160-1 | grid | 93,831,799 | 128,742,177 | -37.2053% | `40e37f5192cecd83` |
+| 3840x2160-1 | expand | 169,665,466 | 142,663,900 | +15.9146% | `adb87702b24cb725` |
+| 3840x2160-1 | combined-stable | 239,175,321 | 246,388,453 | -3.0158% | `adb87702b24cb725` |
+| 3840x2160-1 | combined-changing | 226,586,818 | 253,985,232 | -12.0918% | `b94c0977f04020a5` |
+| 3840x2160-2 | grid | 211,218,875 | 241,317,513 | -14.2500% | `3af178037c9269b1` |
+| 3840x2160-2 | expand | 273,525,083 | 296,535,674 | -8.4126% | `772f44f448774b25` |
+| 3840x2160-2 | combined-stable | 551,759,241 | 585,522,737 | -6.1192% | `772f44f448774b25` |
+| 3840x2160-2 | combined-changing | 523,253,207 | 644,155,169 | -23.1058% | `868ffb15a13be425` |
+
+- **Task 7 decision:** only `1920x1200-1` improved at least 3% in both combined modes; nine of 12 combined observations regressed by more than 2%. The candidate failed both retention conditions and was removed. Large movement in unaffected grid measurements, including `-37.2053%`, further demonstrates environmental noise but does not justify weakening the gate.
+- **Final retained-head consistency run:** `ZIG_GLOBAL_CACHE_DIR=/tmp/wlchroma-phase3b-bench-task8 zig build bench-cpu` produced every label once, every nonzero median below, and 24/24 checksums matching the retained head. These timings are a consistency sample, not another performance denominator.
+
+| Case | Phase | Final median ns | Checksum |
+|---|---|---:|---|
+| 1920x1200-1 | grid | 26,239,507 | `60dc464a322602f8` |
+| 1920x1200-1 | expand | 28,660,535 | `159d1fe211803e25` |
+| 1920x1200-1 | combined-stable | 55,391,301 | `159d1fe211803e25` |
+| 1920x1200-1 | combined-changing | 52,137,213 | `161cbca554f44d65` |
+| 1920x1200-2 | grid | 49,113,390 | `f0df5948e95856c5` |
+| 1920x1200-2 | expand | 60,551,833 | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-stable | 109,945,425 | `3c5ada8a05de5925` |
+| 1920x1200-2 | combined-changing | 106,650,900 | `7f9df58238c106a5` |
+| 2560x1440-1 | grid | 41,652,866 | `b148206e5b384440` |
+| 2560x1440-1 | expand | 54,446,569 | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-stable | 89,988,442 | `c2cefabf9f905c25` |
+| 2560x1440-1 | combined-changing | 91,534,716 | `a39f82258c9b2de5` |
+| 2560x1440-2 | grid | 78,589,181 | `9dffe745f60b33f1` |
+| 2560x1440-2 | expand | 97,345,048 | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-stable | 178,466,378 | `8aa8fc2d82fe9525` |
+| 2560x1440-2 | combined-changing | 178,202,590 | `fa66637d705ef7a5` |
+| 3840x2160-1 | grid | 89,352,967 | `40e37f5192cecd83` |
+| 3840x2160-1 | expand | 111,658,280 | `adb87702b24cb725` |
+| 3840x2160-1 | combined-stable | 197,103,664 | `adb87702b24cb725` |
+| 3840x2160-1 | combined-changing | 197,270,866 | `b94c0977f04020a5` |
+| 3840x2160-2 | grid | 184,153,732 | `3af178037c9269b1` |
+| 3840x2160-2 | expand | 227,611,853 | `772f44f448774b25` |
+| 3840x2160-2 | combined-stable | 420,668,620 | `772f44f448774b25` |
+| 3840x2160-2 | combined-changing | 420,594,466 | `868ffb15a13be425` |
+
+- **Review evidence:** independent whole-branch review covered the approved design/plan, source and lifetime paths, `5bdc843` through `88fa502`, task reports, arithmetic through `u64::max`, error/resource paths, matrices, benchmarks, live evidence, and the audit mappings. After the documentation-evidence fix above, it approved the branch with no remaining Critical, Important, or Minor finding and authorized exactly these seven Fixed dispositions.
+- **Live environment:** Niri on `cairn`, with the only connected output `eDP-1` at `1920x1200@60.026`, scale 1. The isolated normal ReleaseSafe daemon created EGL 1.5/ES2 and a `glass_drift` surface, then accepted a same-effect speed 0.25 to 2.5 reload on the same PID with responsive IPC and no EGL, layout, ownership, allocation, timer-read, or retry warning. The isolated forced-failure build injected exactly one shader-init failure, permanently selected native colormix, configured 192x75 SHM, accepted the same speed sequence without retry, and stayed warning-free through 1024x768, 1920x1080, and restored 1920x1200 configurations.
+- **Output-loss evidence:** while output-less, the daemon reaped its surface, disarmed the timer, remained IPC-responsive, and accepted palette/speed mutations. Approval latency let the pre-armed 10-second recovery service fire before the separately approved output-off command, so automatic watchdog return is not claimed. Manual execution of the identical recovery command restored the output and exercised output recreation, SHM configure, and timer re-arm without a product failure; the test was not repeated.
+- **Restoration:** the exact original main-checkout executable, no-argument config lookup, `/home/px` cwd, socket, and Niri launch behavior were restored as PID `205048`. Query returned `effect=colormix`, `fps=24`, `scale=0.20`, `palette=custom`; the config SHA-256 remained `052350188d4e83ef694ac39edb6762394b4f77fc650a00d69219c1e2f9ff8aa1`; `eDP-1` returned to its original mode/scale; `mpris-chroma.service` was active; and isolated config/build artifacts were removed. The user subsequently confirmed the restored wallpaper looked correct.
+- **Live limitations:** IPC exposes neither speed nor phase, so live phase continuity and acceleration remain deterministic-test claims rather than instrumented measurements. The forced-failure route selects native colormix and therefore cannot prove GPU-only stand-in rebuild counts. No screenshot or pixel inspection was performed, so live edge-fill claims remain automated-test-only. Only one output was available, so simultaneous multi-output phase sharing was not tested on hardware. Separate audit ideas concerning cross-compositor behavior, partial damage, viewporter use, refresh clamping, opacity, and shader constant hoists remain future work and do not weaken these seven closures.

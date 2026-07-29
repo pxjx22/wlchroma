@@ -381,4 +381,3 @@ per-output animation clock calls, halves CPU-effect resolution, eliminates
 steady palette rebuilds, avoids per-cell blending, and consumes cells
 sequentially. Safety becomes explicit at API boundaries rather than relying on
 callers to maintain matching dimensions and slice lengths.
-
