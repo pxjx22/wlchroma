@@ -227,6 +227,8 @@ const SeenKeys = struct {
 };
 
 fn parseAndValidate(content: []const u8) !AppConfig {
+    try validateDocumentBytes(content);
+
     var config = defaultConfig();
 
     // Current section path, e.g. "" for top-level, "outputs", "effect", "effect.settings"
@@ -623,23 +625,42 @@ fn parseFloat(value: []const u8) ?f32 {
     return std.fmt.parseFloat(f32, value) catch null;
 }
 
+fn validateDocumentBytes(content: []const u8) error{MalformedConfig}!void {
+    if (!std.unicode.utf8ValidateSlice(content)) return error.MalformedConfig;
+    for (content, 0..) |byte, i| {
+        if (byte == '\t' or byte == '\n') continue;
+        if (byte == '\r') {
+            if (i + 1 < content.len and content[i + 1] == '\n') continue;
+            return error.MalformedConfig;
+        }
+        if (byte < 0x20 or byte == 0x7f) return error.MalformedConfig;
+    }
+}
+
 fn parseQuotedString(value: []const u8) ?[]const u8 {
     if (value.len < 2) return null;
     if (value[0] != '"') return null;
-    // Find the closing quote
-    const close = std.mem.indexOfScalarPos(u8, value, 1, '"') orelse return null;
-    if (std.mem.trim(u8, value[close + 1 ..], &std.ascii.whitespace).len != 0) return null;
-    return value[1..close];
+    var pos: usize = 1;
+    while (pos < value.len) : (pos += 1) {
+        if (value[pos] == '\\') return null;
+        if (value[pos] == '"') {
+            if (std.mem.trim(u8, value[pos + 1 ..], &std.ascii.whitespace).len != 0) return null;
+            return value[1..pos];
+        }
+    }
+    return null;
 }
 
 fn stripComment(line: []const u8) []const u8 {
-    // Strip # comments that are not inside a string.
-    // Simple approach: if # appears outside of quotes, truncate there.
     var in_quote = false;
-    for (line, 0..) |ch, i| {
-        if (ch == '"') {
-            in_quote = !in_quote;
-        } else if (ch == '#' and !in_quote) {
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (in_quote and line[i] == '\\' and i + 1 < line.len) {
+            i += 1;
+            continue;
+        }
+        if (line[i] == '"') in_quote = !in_quote;
+        if (line[i] == '#' and !in_quote) {
             return std.mem.trimEnd(u8, line[0..i], &std.ascii.whitespace);
         }
     }
@@ -690,8 +711,8 @@ fn parseStringArray(value: []const u8) ?StringArray {
         pos += 1; // skip opening quote
         const start = pos;
         // Find closing quote
-        while (pos < inner.len and inner[pos] != '"') {
-            pos += 1;
+        while (pos < inner.len and inner[pos] != '"') : (pos += 1) {
+            if (inner[pos] == '\\') return null;
         }
         if (pos >= inner.len) return null; // Unterminated string
         const str = inner[start..pos];
@@ -1072,4 +1093,83 @@ test "parseAndValidate speed missing uses default" {
     const toml = "";
     const cfg = try parseAndValidate(toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.speed, 0.001);
+}
+
+test "parseAndValidate rejects invalid UTF-8 and disallowed controls" {
+    const invalid_utf8 = [_]u8{ 'f', 'p', 's', ' ', '=', ' ', '1', '5', '\n', 0xff };
+    const nul = [_]u8{ 'f', 'p', 's', ' ', '=', ' ', '1', '5', 0, '\n' };
+    const del = [_]u8{ 'f', 'p', 's', ' ', '=', ' ', '1', '5', 0x7f, '\n' };
+    const malformed_documents = [_][]const u8{ &invalid_utf8, &nul, &del };
+
+    for (malformed_documents) |document| {
+        try std.testing.expectError(error.MalformedConfig, parseAndValidate(document));
+    }
+    try std.testing.expectError(
+        error.MalformedConfig,
+        parseAndValidate("fps = 15\rscale = 1.0\n"),
+    );
+}
+
+test "parseAndValidate accepts horizontal tabs and CRLF" {
+    const cfg = try parseAndValidate("fps\t=\t30\r\n");
+    try std.testing.expectEqual(@as(u32, 30), cfg.fps);
+}
+
+test "parseAndValidate preserves opaque unknown and version values" {
+    const toml =
+        "version = \"future\\q#value\" # ignored\n" ++
+        "future = \"opaque\\\"#pair\" # ignored\n" ++
+        "fps = 30\n";
+    const cfg = try parseAndValidate(toml);
+    try std.testing.expectEqual(@as(u32, 30), cfg.fps);
+}
+
+fn expectRecognizedEscapeRejected(prefix: []const u8, suffix: []const u8) !void {
+    const escapes = [_][]const u8{ "\\q", "\\n", "\\u1234", "\\\"", "\\" };
+    for (escapes) |escape| {
+        const toml = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}{s}{s}",
+            .{ prefix, escape, suffix },
+        );
+        defer std.testing.allocator.free(toml);
+        if (parseAndValidateFull(std.testing.allocator, toml)) |loaded_value| {
+            std.testing.allocator.free(loaded_value.palettes);
+            return error.TestExpectedError;
+        } else |err| {
+            try std.testing.expect(err == error.InvalidValue);
+        }
+    }
+}
+
+test "recognized string escapes are rejected in every supported context" {
+    try expectRecognizedEscapeRejected("[outputs]\npolicy = \"all", "\"\n");
+    try expectRecognizedEscapeRejected("[effect]\nname = \"colormix", "\"\n");
+    try expectRecognizedEscapeRejected("[renderer]\nupscale_filter = \"nearest", "\"\n");
+    try expectRecognizedEscapeRejected(
+        "[effect.settings]\npalette = [\"#ff0000\", \"#00ff00",
+        "\", \"#0000ff\"]\n",
+    );
+    try expectRecognizedEscapeRejected(
+        "[[palettes]]\nname = \"ocean",
+        "\"\ncolors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n",
+    );
+    try expectRecognizedEscapeRejected(
+        "[[palettes]]\nname = \"ocean\"\ncolors = [\"#0077b6\", \"#00b4d8",
+        "\", \"#90e0ef\"]\n",
+    );
+}
+
+test "parseAndValidateFull keeps hashes in quoted palettes while removing comments" {
+    const result = try parseAndValidateFull(
+        std.testing.allocator,
+        "[[palettes]]\n" ++
+            "name = \"ocean#night\"\n" ++
+            "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"] # ignored\n",
+    );
+    defer std.testing.allocator.free(result.palettes);
+
+    try std.testing.expectEqualStrings("ocean#night", result.palettes[0].nameSlice());
+    try std.testing.expectEqual(@as(u8, 0x00), result.palettes[0].colors[0].r);
+    try std.testing.expectEqual(@as(u8, 0xef), result.palettes[0].colors[2].b);
 }
