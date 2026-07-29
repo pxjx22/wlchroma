@@ -52,6 +52,46 @@ pub fn accept4(fd: fd_t, flags: u32) AcceptError!fd_t {
     }
 }
 
+pub fn eventfdCreate() error{EventFdCreateFailed}!fd_t {
+    const rc = linux.eventfd(0, linux.EFD.NONBLOCK | linux.EFD.CLOEXEC);
+    if (linux.errno(rc) != .SUCCESS) return error.EventFdCreateFailed;
+    return @intCast(rc);
+}
+
+pub fn eventfdRead(fd: fd_t) error{ WouldBlock, ShortRead, EventFdReadFailed }!u64 {
+    var value: u64 = undefined;
+    while (true) {
+        const rc = linux.read(fd, @ptrCast(&value), @sizeOf(u64));
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc != @sizeOf(u64)) return error.ShortRead;
+                return value;
+            },
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            else => return error.EventFdReadFailed,
+        }
+    }
+}
+
+pub fn eventfdWrite(
+    fd: fd_t,
+    value: u64,
+) error{ WouldBlock, ShortWrite, EventFdWriteFailed }!void {
+    while (true) {
+        const rc = linux.write(fd, @ptrCast(&value), @sizeOf(u64));
+        switch (linux.errno(rc)) {
+            .SUCCESS => {
+                if (rc != @sizeOf(u64)) return error.ShortWrite;
+                return;
+            },
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            else => return error.EventFdWriteFailed,
+        }
+    }
+}
+
 pub const SendError = error{
     WouldBlock,
     BrokenPipe,

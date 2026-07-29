@@ -4,6 +4,7 @@ pub const surface_state = @import("wayland/surface_state.zig");
 pub const app = @import("app.zig");
 pub const effect = @import("render/effect.zig");
 pub const config = @import("config/config.zig");
+pub const reload_job = @import("config/reload_job.zig");
 pub const defaults = @import("config/defaults.zig");
 pub const dimensions = @import("wayland/dimensions.zig");
 pub const shm_pool = @import("wayland/shm_pool.zig");

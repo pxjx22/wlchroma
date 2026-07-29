@@ -14,6 +14,22 @@ pub fn build(b: *std.Build) void {
         "phase3a_force_shader_init_failure",
         force_shader_failure,
     );
+    const reload_delay_ms = b.option(
+        u32,
+        "phase3c-reload-delay-ms",
+        "Delay reload worker file loading for live responsiveness testing",
+    ) orelse 0;
+    const force_reload_timer_failure = b.option(
+        bool,
+        "phase3c-force-reload-timer-failure",
+        "Force only reload frame-interval application to fail",
+    ) orelse false;
+    daemon_options.addOption(u32, "phase3c_reload_delay_ms", reload_delay_ms);
+    daemon_options.addOption(
+        bool,
+        "phase3c_force_reload_timer_failure",
+        force_reload_timer_failure,
+    );
 
     // wlr-layer-shell protocol
     const xml = b.path("protocols/wlr-layer-shell-unstable-v1.xml");
@@ -109,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     ipc_dispatch_mod.addImport("sys", sys_mod);
+    ipc_dispatch_mod.addOptions("build_options", daemon_options);
 
     const ipc_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/ipc/protocol_test.zig"),
@@ -162,6 +179,21 @@ pub fn build(b: *std.Build) void {
     const run_signal_fd_tests = b.addRunArtifact(signal_fd_tests);
     test_step.dependOn(&run_signal_fd_tests.step);
     ipc_test_step.dependOn(&run_signal_fd_tests.step);
+
+    const reload_job_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/reload_job_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    reload_job_test_mod.addImport("ipc", ipc_dispatch_mod);
+    const reload_job_tests = b.addTest(.{
+        .root_module = reload_job_test_mod,
+    });
+    const run_reload_job_tests = b.addRunArtifact(reload_job_tests);
+    const reload_test_step = b.step("test-reload", "Run config reload lifecycle tests");
+    reload_test_step.dependOn(&run_reload_job_tests.step);
+    test_step.dependOn(&run_reload_job_tests.step);
+    ipc_test_step.dependOn(&run_reload_job_tests.step);
 
     // Effect mutation tests. effect.zig reaches into ../config/, so the
     // module is rooted at src/ via test_exports.zig.

@@ -32,6 +32,13 @@ pub const LoadResult = struct {
     }
 };
 
+pub const ConfigPathOrigin = enum { explicit, default };
+
+pub const ResolvedConfigPath = struct {
+    path: []const u8,
+    origin: ConfigPathOrigin,
+};
+
 pub const EffectType = enum {
     colormix,
     glass_drift,
@@ -107,20 +114,58 @@ pub fn loadConfigFullRequireFile(
     environ: std.process.Environ,
     explicit_path: ?[]const u8,
 ) !LoadResult {
-    if (explicit_path) |ep| {
-        return loadConfigFullFromExplicitPath(allocator, io, ep);
-    }
-    const path = resolveConfigPath(allocator, environ) catch |err| switch (err) {
+    const resolved = resolveConfigPathForReload(allocator, environ, explicit_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return error.ConfigFileNotFound,
     };
-    defer if (path.allocated) allocator.free(path.slice);
+    defer allocator.free(resolved.path);
 
-    const content = std.Io.Dir.cwd().readFileAlloc(io, path.slice, allocator, .limited(MAX_CONFIG_SIZE)) catch |err| switch (err) {
-        error.FileNotFound => return error.ConfigFileNotFound,
-        else => {
-            std.debug.print("config: failed to read {s}: {}\n", .{ path.slice, err });
+    return loadConfigFullResolved(allocator, io, resolved);
+}
+
+pub fn resolveConfigPathForReload(
+    allocator: std.mem.Allocator,
+    environ: std.process.Environ,
+    explicit_path: ?[]const u8,
+) !ResolvedConfigPath {
+    if (explicit_path) |path| {
+        return .{
+            .path = try allocator.dupe(u8, path),
+            .origin = .explicit,
+        };
+    }
+
+    const path = try resolveConfigPath(allocator, environ);
+    if (path.allocated) {
+        return .{ .path = path.slice, .origin = .default };
+    }
+    return .{
+        .path = try allocator.dupe(u8, path.slice),
+        .origin = .default,
+    };
+}
+
+pub fn loadConfigFullResolved(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    resolved: ResolvedConfigPath,
+) !LoadResult {
+    const content = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        resolved.path,
+        allocator,
+        .limited(MAX_CONFIG_SIZE),
+    ) catch |err| switch (resolved.origin) {
+        .explicit => {
+            std.debug.print("config: failed to read {s}: {}\n", .{ resolved.path, err });
             return error.ConfigFileError;
+        },
+        .default => switch (err) {
+            error.FileNotFound => return error.ConfigFileNotFound,
+            else => {
+                std.debug.print("config: failed to read {s}: {}\n", .{ resolved.path, err });
+                return error.ConfigFileError;
+            },
         },
     };
     defer allocator.free(content);

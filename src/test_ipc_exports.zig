@@ -6,6 +6,8 @@ pub const dispatch = @import("ipc/dispatch.zig");
 pub const connection = @import("ipc/connection.zig");
 pub const server = @import("ipc/server.zig");
 pub const signal_fd = @import("signal_fd.zig");
+pub const config = @import("config/config.zig");
+pub const reload_job = @import("config/reload_job.zig");
 pub const sys = @import("sys");
 
 pub const IpcCommand = dispatch.IpcCommand;
