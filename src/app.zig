@@ -58,6 +58,10 @@ pub const App = struct {
         ) !void {
             return app.applyReloadSnapshotWith(candidate, Timer, timer);
         }
+
+        pub fn updateFrameTimer(app: *App) void {
+            app.updateFrameTimer();
+        }
     } else void;
 
     const FrameTimer = struct {
@@ -287,10 +291,7 @@ pub const App = struct {
 
         if (want_armed) {
             const ns = self.frame_interval_ns;
-            const interval = linux.itimerspec{
-                .it_value = .{ .sec = 0, .nsec = ns },
-                .it_interval = .{ .sec = 0, .nsec = ns },
-            };
+            const interval = frameIntervalSpec(ns);
             sys.timerfdSettime(self.tfd, &interval) catch |err| {
                 std.debug.print("frame timer arm failed: {}\n", .{err});
                 return;
@@ -1261,13 +1262,19 @@ pub const App = struct {
         timer: *Timer,
     ) !void {
         if (self.timer_armed) {
-            const interval = linux.itimerspec{
-                .it_value = .{ .sec = 0, .nsec = interval_ns },
-                .it_interval = .{ .sec = 0, .nsec = interval_ns },
-            };
+            const interval = frameIntervalSpec(interval_ns);
             try timer.set(self.tfd, &interval);
         }
         self.frame_interval_ns = interval_ns;
+    }
+
+    fn frameIntervalSpec(interval_ns: u32) linux.itimerspec {
+        const seconds = interval_ns / std.time.ns_per_s;
+        const nanoseconds = interval_ns % std.time.ns_per_s;
+        return .{
+            .it_value = .{ .sec = seconds, .nsec = nanoseconds },
+            .it_interval = .{ .sec = seconds, .nsec = nanoseconds },
+        };
     }
 
     fn applyFrameInterval(self: *App, interval_ns: u32) !void {

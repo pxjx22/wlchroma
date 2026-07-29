@@ -108,6 +108,12 @@ fn reloadCandidate(allocator: std.mem.Allocator) !LoadResult {
     };
 }
 
+fn createTimerFd() !std.posix.fd_t {
+    const rc = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
+    if (std.os.linux.errno(rc) != .SUCCESS) return error.TimerFdCreateFailed;
+    return @intCast(rc);
+}
+
 test "armed frame interval commits only after timer success" {
     var app: App = undefined;
     app.timer_armed = true;
@@ -124,6 +130,23 @@ test "armed frame interval commits only after timer success" {
     try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_interval.sec);
     try std.testing.expectEqual(@as(i64, 33_333_333), timer.last_interval.?.it_interval.nsec);
     try std.testing.expectEqual(@as(u32, 33_333_333), app.frame_interval_ns);
+}
+
+test "armed one fps interval normalizes to a valid timespec" {
+    var app: App = undefined;
+    app.timer_armed = true;
+    app.tfd = 42;
+    app.frame_interval_ns = 66_666_667;
+    var timer = FakeTimer{};
+
+    try App.TestAdapter.applyFrameInterval(&app, 1_000_000_000, FakeTimer, &timer);
+
+    try std.testing.expectEqual(@as(usize, 1), timer.calls);
+    try std.testing.expectEqual(@as(i64, 1), timer.last_interval.?.it_value.sec);
+    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_value.nsec);
+    try std.testing.expectEqual(@as(i64, 1), timer.last_interval.?.it_interval.sec);
+    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_interval.nsec);
+    try std.testing.expectEqual(@as(u32, 1_000_000_000), app.frame_interval_ns);
 }
 
 test "armed frame interval failure preserves stored interval" {
@@ -153,6 +176,30 @@ test "disarmed frame interval updates storage without timer syscall" {
 
     try std.testing.expectEqual(@as(usize, 0), timer.calls);
     try std.testing.expectEqual(@as(u32, 33_333_333), app.frame_interval_ns);
+}
+
+test "disarmed one fps interval arms successfully when an output appears" {
+    const allocator = std.testing.allocator;
+    const tfd = try createTimerFd();
+    defer _ = std.os.linux.close(tfd);
+
+    var surface: SurfaceState = undefined;
+    var app: App = undefined;
+    app.surfaces = .empty;
+    defer app.surfaces.deinit(allocator);
+    try app.surfaces.append(allocator, &surface);
+    app.timer_armed = false;
+    app.tfd = tfd;
+    app.frame_interval_ns = 66_666_667;
+    var timer = FakeTimer{ .fail = true };
+
+    try App.TestAdapter.applyFrameInterval(&app, 1_000_000_000, FakeTimer, &timer);
+    try std.testing.expectEqual(@as(usize, 0), timer.calls);
+    try std.testing.expectEqual(@as(u32, 1_000_000_000), app.frame_interval_ns);
+
+    App.TestAdapter.updateFrameTimer(&app);
+
+    try std.testing.expect(app.timer_armed);
 }
 
 test "reload timer failure consumes candidate and preserves runtime snapshot" {
