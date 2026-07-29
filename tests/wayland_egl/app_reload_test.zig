@@ -166,6 +166,7 @@ fn sendExact(fd: posix.fd_t, bytes: []const u8) !void {
 const FakeReloadOps = struct {
     thread_starts: usize = 0,
     loads: usize = 0,
+    monotonic_calls: usize = 0,
     gate: u32 align(4) = 0,
     eventfd_create_error: ?anyerror = null,
     thread_start_error: ?anyerror = null,
@@ -227,6 +228,7 @@ const FakeReloadOps = struct {
 
     fn monotonicNs(context: ?*anyopaque) !u64 {
         const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.monotonic_calls += 1;
         if (self.monotonic_error) |err| return err;
         return self.monotonic_now_ns;
     }
@@ -495,6 +497,90 @@ test "normal and reload clients expire independently" {
         App.TestAdapter.pollTimeoutAt(&fixture.app, 200 * std.time.ns_per_ms),
     );
     try std.testing.expect(fixture.app.reload_job == null);
+}
+
+test "stale reload client terminal event cannot orphan its replacement" {
+    var fixture = try AppReloadFixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    fixture.ops_state.use_candidate = true;
+    try fixture.acceptReload();
+    fixture.completeReload();
+
+    const expired_fd = fixture.app.reload_job.?.client.?.fd;
+    fixture.app.reload_job.?.client.?.response_deadline_ns = 100 * std.time.ns_per_ms;
+    try fixture.installNormalClient(0);
+    try std.testing.expectEqual(
+        @as(i32, 400),
+        App.TestAdapter.pollTimeoutAt(&fixture.app, 100 * std.time.ns_per_ms),
+    );
+    try std.testing.expect(fixture.app.reload_job == null);
+
+    try fixture.acceptReload();
+    const replacement_fd = fixture.app.reload_job.?.client.?.fd;
+    try std.testing.expect(replacement_fd != expired_fd);
+
+    App.TestAdapter.serviceReloadClient(
+        &fixture.app,
+        expired_fd,
+        linux.POLL.HUP | linux.POLL.ERR,
+    );
+
+    try std.testing.expectEqual(reload_job.Phase.loading, fixture.app.reload_job.?.phase);
+    try std.testing.expect(fixture.app.reload_job.?.client != null);
+    try std.testing.expectEqual(replacement_fd, fixture.app.reload_job.?.client.?.fd);
+}
+
+test "reload response expiry between aggregate check and write prevents flush" {
+    var fixture = try AppReloadFixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    fixture.ops_state.use_candidate = true;
+    fixture.ops_state.monotonic_now_ns = 100 * std.time.ns_per_ms;
+    try fixture.acceptReload();
+    fixture.completeReload();
+
+    const response_fd = fixture.app.reload_job.?.client.?.fd;
+    fixture.app.reload_job.?.client.?.response_deadline_ns = 600 * std.time.ns_per_ms;
+    try std.testing.expectEqual(
+        @as(i32, 1),
+        App.TestAdapter.pollTimeoutAt(&fixture.app, 599 * std.time.ns_per_ms),
+    );
+    const clock_calls_before_service = fixture.ops_state.monotonic_calls;
+    fixture.ops_state.monotonic_now_ns = 601 * std.time.ns_per_ms;
+
+    App.TestAdapter.serviceReloadClient(&fixture.app, response_fd, linux.POLL.OUT);
+
+    try std.testing.expectEqual(
+        clock_calls_before_service + 1,
+        fixture.ops_state.monotonic_calls,
+    );
+    try std.testing.expect(fixture.app.reload_job == null);
+    var buf: [16]u8 = undefined;
+    const bytes_read = linux.read(fixture.peer_fd, &buf, buf.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(bytes_read));
+    try std.testing.expectEqual(@as(usize, 0), bytes_read);
+}
+
+test "reload response service clock failure closes without flushing" {
+    var fixture = try AppReloadFixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    fixture.ops_state.use_candidate = true;
+    try fixture.acceptReload();
+    fixture.completeReload();
+
+    const response_fd = fixture.app.reload_job.?.client.?.fd;
+    const clock_calls_before_service = fixture.ops_state.monotonic_calls;
+    fixture.ops_state.monotonic_error = error.TestMonotonicFailed;
+    App.TestAdapter.serviceReloadClient(&fixture.app, response_fd, linux.POLL.OUT);
+
+    try std.testing.expectEqual(
+        clock_calls_before_service + 1,
+        fixture.ops_state.monotonic_calls,
+    );
+    try std.testing.expect(fixture.app.reload_job == null);
+    var buf: [16]u8 = undefined;
+    const bytes_read = linux.read(fixture.peer_fd, &buf, buf.len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(bytes_read));
+    try std.testing.expectEqual(@as(usize, 0), bytes_read);
 }
 
 test "notification write failure completes through fallback with zero outputs" {

@@ -77,6 +77,10 @@ pub const App = struct {
             app.serviceReloadReady();
         }
 
+        pub fn serviceReloadClient(app: *App, polled_fd: posix.fd_t, revents: i16) void {
+            app.serviceReloadClient(polled_fd, revents);
+        }
+
         pub fn forceReloadTimerFailure() bool {
             return build_options.phase3c_force_reload_timer_failure;
         }
@@ -849,7 +853,7 @@ pub const App = struct {
                 break;
             }
             const ipc_role = self.configureIpcPollSlot(&fds[3]);
-            self.configureReloadPollSlots(&fds[4], &fds[5]);
+            const reload_client_fd = self.configureReloadPollSlots(&fds[4], &fds[5]);
 
             for (&fds) |*poll_fd| poll_fd.revents = 0;
             _ = posix.poll(&fds, poll_timeout) catch |err| {
@@ -948,7 +952,9 @@ pub const App = struct {
             if (self.running and ipc_role != .none) {
                 self.serviceIpcSlot(ipc_role, fds[3].revents);
             }
-            if (self.running) self.serviceReloadClient(fds[5].revents);
+            if (self.running) {
+                if (reload_client_fd) |fd| self.serviceReloadClient(fd, fds[5].revents);
+            }
             if (self.running) {
                 if (fds[4].revents & poll_terminal != 0) {
                     if (self.reload_job) |job| {
@@ -1000,10 +1006,10 @@ pub const App = struct {
         self: *App,
         notifier_slot: *posix.pollfd,
         client_slot: *posix.pollfd,
-    ) void {
+    ) ?posix.fd_t {
         notifier_slot.* = .{ .fd = -1, .events = 0, .revents = 0 };
         client_slot.* = .{ .fd = -1, .events = 0, .revents = 0 };
-        const job = self.reload_job orelse return;
+        const job = self.reload_job orelse return null;
 
         if (job.phase != .responding and !job.notification_fault) {
             notifier_slot.fd = job.event_fd;
@@ -1015,7 +1021,9 @@ pub const App = struct {
                 client.pollEvents()
             else
                 0;
+            return client.fd;
         }
+        return null;
     }
 
     fn minPollTimeout(current: i32, candidate: i32) i32 {
@@ -1274,9 +1282,10 @@ pub const App = struct {
         if (shutdown_after_close) self.running = false;
     }
 
-    fn serviceReloadClient(self: *App, revents: i16) void {
+    fn serviceReloadClient(self: *App, polled_fd: posix.fd_t, revents: i16) void {
         const job = self.reload_job orelse return;
         if (job.client == null) return;
+        if (job.client.?.fd != polled_fd) return;
 
         const terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
         if (job.phase != .responding) {
@@ -1289,6 +1298,18 @@ pub const App = struct {
             .reading => {},
             .writing => writing: {
                 if (revents & linux.POLL.OUT != 0) {
+                    const now_ns = self.reload_ops.monotonic_ns(self.reload_ops.context) catch |err| {
+                        std.debug.print(
+                            "ipc: monotonic clock failed before reload write: {}; closing client\n",
+                            .{err},
+                        );
+                        should_close = true;
+                        break :writing;
+                    };
+                    if (client.expired(now_ns)) {
+                        should_close = true;
+                        break :writing;
+                    }
                     const outcome = client.flushReady() catch |err| {
                         std.debug.print("ipc: reload client write failed: {}\n", .{err});
                         should_close = true;
