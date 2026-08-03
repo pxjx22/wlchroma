@@ -535,7 +535,7 @@ fn parseDocumentObserved(
                         return error.InvalidValue;
                     };
                     if (name.len == 0 or name.len > 63) {
-                        std.debug.print("config: line {}: [[palettes]] name must be 1–63 characters\n", .{line_num});
+                        std.debug.print("config: line {}: [[palettes]] name must be 1–63 UTF-8 bytes\n", .{line_num});
                         return error.InvalidValue;
                     }
                     seen_palette_names.add(name) catch |err| switch (err) {
@@ -899,6 +899,30 @@ test "parseAndValidateFull collects named palettes" {
     try std.testing.expectEqual(@as(u8, 0x00), result.palettes[0].colors[0].r);
     try std.testing.expectEqual(@as(u8, 0xb4), result.palettes[0].colors[1].g);
     try std.testing.expectEqual(@as(u8, 0xef), result.palettes[0].colors[2].b);
+}
+
+test "parseAndValidateFull accepts a 63-byte multibyte palette name and rejects 64 bytes" {
+    const name_63 = "あいうえおあいうえおあいうえおあいうえおあ";
+    const name_64 = "あいうえおあいうえおあいうえおあいうえおあx";
+    const valid_toml =
+        "[[palettes]]\n" ++
+        "name = \"あいうえおあいうえおあいうえおあいうえおあ\"\n" ++
+        "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n";
+    const invalid_toml =
+        "[[palettes]]\n" ++
+        "name = \"あいうえおあいうえおあいうえおあいうえおあx\"\n" ++
+        "colors = [\"#0077b6\", \"#00b4d8\", \"#90e0ef\"]\n";
+
+    try std.testing.expectEqual(@as(usize, 63), name_63.len);
+    try std.testing.expectEqual(@as(usize, 64), name_64.len);
+
+    const result = try parseAndValidateFull(std.testing.allocator, valid_toml);
+    defer std.testing.allocator.free(result.palettes);
+    try std.testing.expectEqualStrings(name_63, result.palettes[0].nameSlice());
+    try std.testing.expectError(
+        error.InvalidValue,
+        parseAndValidateFull(std.testing.allocator, invalid_toml),
+    );
 }
 
 test "parseAndValidateFull rejects duplicate palette names" {

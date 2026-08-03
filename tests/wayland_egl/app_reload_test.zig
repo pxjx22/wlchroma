@@ -667,6 +667,39 @@ test "completed reload applies once then starts a fresh response deadline" {
     try std.testing.expectEqual(palettes_ptr, fixture.app.palettes.ptr);
 }
 
+test "service joins a worker-owned handle before applying one ready reload" {
+    var fixture = try AppReloadFixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    fixture.ops_state.use_candidate = true;
+    fixture.ops_state.monotonic_now_ns = 900 * std.time.ns_per_ms;
+    try fixture.acceptReload();
+
+    fixture.ops_state.release();
+    while (!fixture.app.reload_job.?.readyAcquire()) {
+        try std.Thread.yield();
+    }
+
+    try std.testing.expect(fixture.app.reload_job.?.thread != null);
+    App.TestAdapter.serviceReloadReady(&fixture.app);
+
+    try std.testing.expect(fixture.app.reload_job.?.thread == null);
+    try std.testing.expect(fixture.app.reload_job.?.outcome == .pending);
+    try std.testing.expectEqual(@as(usize, 1), fixture.ops_state.loads);
+    try std.testing.expectEqual(wayland.config.EffectType.glass_drift, fixture.app.configured_effect_type);
+    try std.testing.expectEqual(new_colors, fixture.app.current_palette);
+    try std.testing.expectEqual(reload_job.Phase.responding, fixture.app.reload_job.?.phase);
+    try std.testing.expectEqual(.writing, fixture.app.reload_job.?.client.?.state);
+    try std.testing.expectEqual(
+        1_400 * std.time.ns_per_ms,
+        fixture.app.reload_job.?.client.?.response_deadline_ns,
+    );
+
+    const palettes_ptr = fixture.app.palettes.ptr;
+    App.TestAdapter.serviceReloadReady(&fixture.app);
+    try std.testing.expectEqual(@as(usize, 1), fixture.ops_state.loads);
+    try std.testing.expectEqual(palettes_ptr, fixture.app.palettes.ptr);
+}
+
 test "client HUP while loading still applies then discards response" {
     var fixture = try AppReloadFixture.init(std.testing.allocator);
     defer fixture.deinit();
@@ -721,11 +754,14 @@ test "pending stop response suppresses simultaneous reload completion" {
 
 test "shutdown joins worker and frees an unconsumed result exactly once" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var fixture_deinited = false;
     var fixture = try AppReloadFixture.init(failing.allocator());
+    errdefer if (!fixture_deinited) fixture.deinit();
     fixture.ops_state.use_candidate = true;
     try fixture.acceptReload();
 
     fixture.deinit();
+    fixture_deinited = true;
 
     try std.testing.expectEqual(failing.allocations, failing.deallocations);
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
