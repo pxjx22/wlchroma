@@ -512,6 +512,18 @@ pub fn build(b: *std.Build) void {
     const run_animation_state_tests = b.addRunArtifact(animation_state_tests);
     test_step.dependOn(&run_animation_state_tests.step);
 
+    const frame_schedule_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/frame_schedule_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    frame_schedule_test_mod.addImport("wlchroma_src", src_exports_mod);
+    const frame_schedule_tests = b.addTest(.{
+        .root_module = frame_schedule_test_mod,
+    });
+    const run_frame_schedule_tests = b.addRunArtifact(frame_schedule_tests);
+    test_step.dependOn(&run_frame_schedule_tests.step);
+
     // Timer-expiration decoding is pure and requires an exact native-endian
     // timerfd record before the application may advance or render.
     const timer_expirations_test_mod = b.createModule(.{

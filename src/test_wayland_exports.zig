@@ -13,6 +13,7 @@ pub const gpu_upload_state = @import("render/gpu_upload_state.zig");
 pub const gpu_fallback = @import("render/gpu_fallback.zig");
 pub const effect_shader = @import("render/effect_shader.zig");
 pub const animation_state = @import("render/animation_state.zig");
+pub const frame_schedule = @import("render/frame_schedule.zig");
 pub const cpu_standin = @import("render/cpu_standin.zig");
 pub const gpu_effect_state = @import("render/gpu_effect_state.zig");
 pub const colormix = @import("render/colormix.zig");

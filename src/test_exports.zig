@@ -13,6 +13,7 @@ pub const gpu_epoch = @import("render/gpu_epoch.zig");
 pub const gpu_upload_state = @import("render/gpu_upload_state.zig");
 pub const gpu_fallback = @import("render/gpu_fallback.zig");
 pub const animation_state = @import("render/animation_state.zig");
+pub const frame_schedule = @import("render/frame_schedule.zig");
 pub const timer_expirations = @import("render/timer_expirations.zig");
 pub const cpu_standin = @import("render/cpu_standin.zig");
 pub const cell_grid = @import("render/cell_grid.zig");
