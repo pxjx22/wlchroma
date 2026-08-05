@@ -51,6 +51,18 @@ const FakeTimer = struct {
     }
 };
 
+const FakeClock = struct {
+    calls: usize = 0,
+    value: u64 = service_now_ns,
+    failure: ?anyerror = null,
+
+    pub fn now(self: *@This()) !u64 {
+        self.calls += 1;
+        if (self.failure) |err| return err;
+        return self.value;
+    }
+};
+
 fn appConfig() AppConfig {
     return .{
         .fps = 15,
@@ -89,7 +101,10 @@ fn reloadFixture(allocator: std.mem.Allocator, surface: *SurfaceState) !App {
     app.effect_shader = null;
     app.gpu_upload_state = .{};
     app.blit_shader = null;
-    app.timer_armed = true;
+    app.frame_schedule = try wayland.frame_schedule.FrameSchedule.begin(0, cfg.frame_interval_ns);
+    app.timer_recovery_pending = false;
+    app.last_timer_error_log_ns = null;
+    App.TestAdapter.seedFrameTimerAbsolute(&app, cfg.frame_interval_ns);
     app.frame_interval_ns = cfg.frame_interval_ns;
     app.renderer_scale = cfg.renderer_scale;
     app.upscale_filter = cfg.upscale_filter;
@@ -146,6 +161,27 @@ fn createTimerFd() !std.posix.fd_t {
     const rc = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (std.os.linux.errno(rc) != .SUCCESS) return error.TimerFdCreateFailed;
     return @intCast(rc);
+}
+
+fn initReadySurface(surface: *SurfaceState, output: *wayland.output.OutputInfo) !void {
+    output.* = .{
+        .wl_output = null,
+        .registry_name = 1,
+        .name = "",
+        .width = 1920,
+        .height = 1080,
+        .refresh_mhz = 0,
+        .done = true,
+        .removed = false,
+        .allocator = std.testing.allocator,
+    };
+    surface.output = output;
+    surface.dead = false;
+    surface.torn_down = false;
+    surface.configured = true;
+    surface.extent = try wayland.dimensions.Extent.init(1920, 1080);
+    surface.frame_callback = null;
+    surface.layer_surface = .{ .wl_surface = @ptrFromInt(0x1000), .layer_surface = null };
 }
 
 fn socketPair() ![2]posix.fd_t {
@@ -290,7 +326,10 @@ const AppReloadFixture = struct {
         app.blit_shader = null;
         app.gpu_pipeline_failed = false;
         app.gpu_fallback_applied = false;
-        app.timer_armed = false;
+        app.frame_schedule = wayland.frame_schedule.FrameSchedule.inactive();
+        app.timer_recovery_pending = false;
+        app.last_timer_error_log_ns = null;
+        App.TestAdapter.seedFrameTimerDisarmed(&app);
         app.running = true;
         app.frame_interval_ns = cfg.frame_interval_ns;
         app.renderer_scale = cfg.renderer_scale;
@@ -476,6 +515,19 @@ test "loading reload caps an otherwise infinite poll at 500 milliseconds" {
         @as(i32, 500),
         App.TestAdapter.pollTimeoutAt(&fixture.app, service_now_ns),
     );
+}
+
+test "recovery pending bounds poll with no clients or reload" {
+    var fixture = try AppReloadFixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    if (fixture.app.ipc_client) |*client| _ = client.close();
+    fixture.app.ipc_client = null;
+    fixture.app.timer_recovery_pending = true;
+    fixture.app.frame_schedule = wayland.frame_schedule.FrameSchedule.inactive();
+
+    try std.testing.expectEqual(@as(i32, 100), App.TestAdapter.ipcPollTimeout(&fixture.app));
+    fixture.ops_state.monotonic_error = error.TestMonotonicFailed;
+    try std.testing.expectEqual(@as(i32, 100), App.TestAdapter.ipcPollTimeout(&fixture.app));
 }
 
 test "normal and reload clients expire independently" {
@@ -781,8 +833,14 @@ test "reload-only timer fault leaves set-fps on the production timer path" {
     defer closeFd(tfd);
     var fixture = try AppReloadFixture.init(std.testing.allocator);
     defer fixture.deinit();
+    defer fixture.app.surfaces.deinit(std.testing.allocator);
+    var output: wayland.output.OutputInfo = undefined;
+    var surface: SurfaceState = undefined;
+    try initReadySurface(&surface, &output);
+    try fixture.app.surfaces.append(std.testing.allocator, &surface);
     fixture.app.tfd = tfd;
-    fixture.app.timer_armed = true;
+    fixture.app.frame_schedule = try wayland.frame_schedule.FrameSchedule.begin(0, 66_666_667);
+    App.TestAdapter.seedFrameTimerAbsolute(&fixture.app, 66_666_667);
     fixture.ops_state.use_candidate = true;
     try fixture.acceptReload();
 
@@ -812,98 +870,11 @@ test "reload response clock failure closes only its completed job" {
     try std.testing.expect(fixture.app.running);
 }
 
-test "armed frame interval commits only after timer success" {
-    var app: App = undefined;
-    app.timer_armed = true;
-    app.tfd = 42;
-    app.frame_interval_ns = 66_666_667;
-    var timer = FakeTimer{};
-
-    try App.TestAdapter.applyFrameInterval(&app, 33_333_333, FakeTimer, &timer);
-
-    try std.testing.expectEqual(@as(usize, 1), timer.calls);
-    try std.testing.expectEqual(@as(std.posix.fd_t, 42), timer.last_fd.?);
-    try std.testing.expectEqual(false, timer.last_flags.?.ABSTIME);
-    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_value.sec);
-    try std.testing.expectEqual(@as(i64, 33_333_333), timer.last_interval.?.it_value.nsec);
-    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_interval.sec);
-    try std.testing.expectEqual(@as(i64, 33_333_333), timer.last_interval.?.it_interval.nsec);
-    try std.testing.expectEqual(@as(u32, 33_333_333), app.frame_interval_ns);
-}
-
-test "armed one fps interval normalizes to a valid timespec" {
-    var app: App = undefined;
-    app.timer_armed = true;
-    app.tfd = 42;
-    app.frame_interval_ns = 66_666_667;
-    var timer = FakeTimer{};
-
-    try App.TestAdapter.applyFrameInterval(&app, 1_000_000_000, FakeTimer, &timer);
-
-    try std.testing.expectEqual(@as(usize, 1), timer.calls);
-    try std.testing.expectEqual(@as(i64, 1), timer.last_interval.?.it_value.sec);
-    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_value.nsec);
-    try std.testing.expectEqual(@as(i64, 1), timer.last_interval.?.it_interval.sec);
-    try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_interval.nsec);
-    try std.testing.expectEqual(@as(u32, 1_000_000_000), app.frame_interval_ns);
-}
-
-test "armed frame interval failure preserves stored interval" {
-    var app: App = undefined;
-    app.timer_armed = true;
-    app.tfd = 42;
-    app.frame_interval_ns = 66_666_667;
-    var timer = FakeTimer{ .fail = true };
-
-    try std.testing.expectError(
-        error.TimerFdSetTimeFailed,
-        App.TestAdapter.applyFrameInterval(&app, 33_333_333, FakeTimer, &timer),
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), timer.calls);
-    try std.testing.expectEqual(@as(u32, 66_666_667), app.frame_interval_ns);
-}
-
-test "disarmed frame interval updates storage without timer syscall" {
-    var app: App = undefined;
-    app.timer_armed = false;
-    app.tfd = 42;
-    app.frame_interval_ns = 66_666_667;
-    var timer = FakeTimer{ .fail = true };
-
-    try App.TestAdapter.applyFrameInterval(&app, 33_333_333, FakeTimer, &timer);
-
-    try std.testing.expectEqual(@as(usize, 0), timer.calls);
-    try std.testing.expectEqual(@as(u32, 33_333_333), app.frame_interval_ns);
-}
-
-test "disarmed one fps interval arms successfully when an output appears" {
-    const allocator = std.testing.allocator;
-    const tfd = try createTimerFd();
-    defer _ = std.os.linux.close(tfd);
-
-    var surface: SurfaceState = undefined;
-    var app: App = undefined;
-    app.surfaces = .empty;
-    defer app.surfaces.deinit(allocator);
-    try app.surfaces.append(allocator, &surface);
-    app.timer_armed = false;
-    app.tfd = tfd;
-    app.frame_interval_ns = 66_666_667;
-    var timer = FakeTimer{ .fail = true };
-
-    try App.TestAdapter.applyFrameInterval(&app, 1_000_000_000, FakeTimer, &timer);
-    try std.testing.expectEqual(@as(usize, 0), timer.calls);
-    try std.testing.expectEqual(@as(u32, 1_000_000_000), app.frame_interval_ns);
-
-    App.TestAdapter.updateFrameTimer(&app);
-
-    try std.testing.expect(app.timer_armed);
-}
-
 test "timer failure frees candidate and preserves every App field" {
     const allocator = std.testing.allocator;
     var surface: SurfaceState = undefined;
+    var output: wayland.output.OutputInfo = undefined;
+    try initReadySurface(&surface, &output);
     surface.renderer_scale = 0.5;
     surface.upscale_filter = .nearest;
     var app = try reloadFixture(allocator, &surface);
@@ -911,9 +882,14 @@ test "timer failure frees candidate and preserves every App field" {
     defer allocator.free(app.palettes);
     app.animation.phase = 7.5;
     var candidate = try runtimeReloadCandidate(allocator);
+    var clock = FakeClock{ .value = 100 };
     var timer = FakeTimer{ .fail = true };
 
     const interval_before = app.frame_interval_ns;
+    const schedule_before = app.frame_schedule;
+    const timer_deadline_before = App.TestAdapter.timerDeadline(&app);
+    const recovery_before = app.timer_recovery_pending;
+    const last_error_before = app.last_timer_error_log_ns;
     const scale_before = app.renderer_scale;
     const filter_before = app.upscale_filter;
     const configured_effect_before = app.configured_effect_type;
@@ -931,11 +907,79 @@ test "timer failure frees candidate and preserves every App field" {
 
     try std.testing.expectError(
         error.TimerFdSetTimeFailed,
-        App.TestAdapter.applyReloadSnapshot(&app, &candidate, FakeTimer, &timer),
+        App.TestAdapter.applyReloadSnapshot(&app, &candidate, FakeClock, &clock, FakeTimer, &timer),
     );
 
     try std.testing.expectEqual(@as(usize, 1), timer.calls);
     try std.testing.expectEqual(interval_before, app.frame_interval_ns);
+    try std.testing.expectEqualDeep(schedule_before, app.frame_schedule);
+    try std.testing.expectEqual(timer_deadline_before, App.TestAdapter.timerDeadline(&app));
+    try std.testing.expectEqual(recovery_before, app.timer_recovery_pending);
+    try std.testing.expectEqual(last_error_before, app.last_timer_error_log_ns);
+    try std.testing.expectEqual(scale_before, app.renderer_scale);
+    try std.testing.expectEqual(filter_before, app.upscale_filter);
+    try std.testing.expectEqual(@as(f32, 0.5), surface.renderer_scale);
+    try std.testing.expectEqual(wayland.config.UpscaleFilter.nearest, surface.upscale_filter);
+    try std.testing.expectEqual(configured_effect_before, app.configured_effect_type);
+    try std.testing.expectEqual(running_effect_before, std.meta.activeTag(app.effect));
+    try std.testing.expectEqual(effect_palette_before, app.effect.paletteData().?.*);
+    try std.testing.expect(std.meta.eql(effect_before, app.effect));
+    try std.testing.expectEqualDeep(animation_before, app.animation);
+    try std.testing.expectEqualDeep(upload_before, app.gpu_upload_state);
+    try std.testing.expectEqual(palette_before, app.current_palette);
+    try std.testing.expectEqualDeep(fade_before, app.fade);
+    try std.testing.expectEqual(palettes_ptr_before, app.palettes.ptr);
+    try std.testing.expectEqualDeep(palettes_before, app.palettes[0]);
+    try std.testing.expectEqualSlices(u8, &active_name_before, &app.active_palette_name_buf);
+    try std.testing.expectEqual(active_name_len_before, app.active_palette_name_len);
+}
+
+test "reload clock failure frees candidate and preserves every App field" {
+    const allocator = std.testing.allocator;
+    var surface: SurfaceState = undefined;
+    var output: wayland.output.OutputInfo = undefined;
+    try initReadySurface(&surface, &output);
+    surface.renderer_scale = 0.5;
+    surface.upscale_filter = .nearest;
+    var app = try reloadFixture(allocator, &surface);
+    defer app.surfaces.deinit(allocator);
+    defer allocator.free(app.palettes);
+    app.animation.phase = 7.5;
+    var candidate = try runtimeReloadCandidate(allocator);
+    var clock = FakeClock{ .failure = error.ClockGetTimeFailed };
+    var timer = FakeTimer{};
+
+    const interval_before = app.frame_interval_ns;
+    const schedule_before = app.frame_schedule;
+    const timer_deadline_before = App.TestAdapter.timerDeadline(&app);
+    const recovery_before = app.timer_recovery_pending;
+    const last_error_before = app.last_timer_error_log_ns;
+    const scale_before = app.renderer_scale;
+    const filter_before = app.upscale_filter;
+    const configured_effect_before = app.configured_effect_type;
+    const running_effect_before = std.meta.activeTag(app.effect);
+    const effect_palette_before = app.effect.paletteData().?.*;
+    const effect_before = app.effect;
+    const animation_before = app.animation;
+    const upload_before = app.gpu_upload_state;
+    const palette_before = app.current_palette;
+    const fade_before = app.fade;
+    const palettes_ptr_before = app.palettes.ptr;
+    const palettes_before = app.palettes[0];
+    const active_name_before = app.active_palette_name_buf;
+    const active_name_len_before = app.active_palette_name_len;
+
+    try std.testing.expectError(
+        error.ClockGetTimeFailed,
+        App.TestAdapter.applyReloadSnapshot(&app, &candidate, FakeClock, &clock, FakeTimer, &timer),
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), timer.calls);
+    try std.testing.expectEqual(interval_before, app.frame_interval_ns);
+    try std.testing.expectEqualDeep(schedule_before, app.frame_schedule);
+    try std.testing.expectEqual(timer_deadline_before, App.TestAdapter.timerDeadline(&app));
+    try std.testing.expectEqual(recovery_before, app.timer_recovery_pending);
+    try std.testing.expectEqual(last_error_before, app.last_timer_error_log_ns);
     try std.testing.expectEqual(scale_before, app.renderer_scale);
     try std.testing.expectEqual(filter_before, app.upscale_filter);
     try std.testing.expectEqual(@as(f32, 0.5), surface.renderer_scale);
@@ -957,15 +1001,18 @@ test "timer failure frees candidate and preserves every App field" {
 test "reload success transfers candidate palettes exactly once" {
     const allocator = std.testing.allocator;
     var surface: SurfaceState = undefined;
+    var output: wayland.output.OutputInfo = undefined;
+    try initReadySurface(&surface, &output);
     surface.renderer_scale = 0.5;
     surface.upscale_filter = .nearest;
     var app = try reloadFixture(allocator, &surface);
     defer app.surfaces.deinit(allocator);
     var candidate = try reloadCandidate(allocator);
     const candidate_palettes_ptr = candidate.palettes.ptr;
+    var clock = FakeClock{ .value = 100 };
     var timer = FakeTimer{};
 
-    try App.TestAdapter.applyReloadSnapshot(&app, &candidate, FakeTimer, &timer);
+    try App.TestAdapter.applyReloadSnapshot(&app, &candidate, FakeClock, &clock, FakeTimer, &timer);
     defer allocator.free(app.palettes);
 
     try std.testing.expectEqual(@as(usize, 1), timer.calls);

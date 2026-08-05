@@ -9,6 +9,7 @@ const OutputInfo = @import("wayland/output.zig").OutputInfo;
 const SurfaceState = @import("wayland/surface_state.zig").SurfaceState;
 const Effect = @import("render/effect.zig").Effect;
 const AnimationState = @import("render/animation_state.zig").AnimationState;
+const FrameSchedule = @import("render/frame_schedule.zig").FrameSchedule;
 const timer_expirations = @import("render/timer_expirations.zig");
 const EglContext = @import("render/egl_context.zig").EglContext;
 const gpu_epoch = @import("render/gpu_epoch.zig");
@@ -33,6 +34,21 @@ const dispatch = @import("ipc/dispatch.zig");
 const signal_fd = @import("signal_fd.zig");
 const sys = @import("sys");
 
+const recovery_cap_ms: i32 = 100;
+
+const FrameTimerState = union(enum) {
+    disarmed,
+    absolute: u64,
+    relative_recovery,
+
+    fn isArmed(self: FrameTimerState) bool {
+        return switch (self) {
+            .disarmed => false,
+            .absolute, .relative_recovery => true,
+        };
+    }
+};
+
 pub const App = struct {
     pub const TestAdapter = if (builtin.is_test) struct {
         pub fn retireSurfaceGpu(app: *App, surface: *SurfaceState) void {
@@ -46,23 +62,83 @@ pub const App = struct {
         pub fn applyFrameInterval(
             app: *App,
             interval_ns: u32,
+            comptime Clock: type,
+            clock: *Clock,
             comptime Timer: type,
             timer: *Timer,
         ) !void {
-            return app.applyFrameIntervalWith(interval_ns, Timer, timer);
+            return app.applyFrameIntervalWith(interval_ns, Clock, clock, Timer, timer);
         }
 
         pub fn applyReloadSnapshot(
             app: *App,
             candidate: *config_mod.LoadResult,
+            comptime Clock: type,
+            clock: *Clock,
             comptime Timer: type,
             timer: *Timer,
         ) !void {
-            return app.applyReloadSnapshotWith(candidate, Timer, timer);
+            return app.applyReloadSnapshotWith(candidate, Clock, clock, Timer, timer);
         }
 
-        pub fn updateFrameTimer(app: *App) void {
-            app.updateFrameTimer();
+        pub const TimerMode = enum { disarmed, absolute, relative_recovery };
+
+        pub fn seedFrameTimerDisarmed(app: *App) void {
+            app.frame_timer_state = .disarmed;
+        }
+
+        pub fn seedFrameTimerAbsolute(app: *App, deadline_ns: u64) void {
+            app.frame_timer_state = .{ .absolute = deadline_ns };
+        }
+
+        pub fn timerMode(app: *const App) TimerMode {
+            return switch (app.frame_timer_state) {
+                .disarmed => .disarmed,
+                .absolute => .absolute,
+                .relative_recovery => .relative_recovery,
+            };
+        }
+
+        pub fn timerDeadline(app: *const App) ?u64 {
+            return switch (app.frame_timer_state) {
+                .absolute => |deadline_ns| deadline_ns,
+                .disarmed, .relative_recovery => null,
+            };
+        }
+
+        pub fn hasReadySurface(app: *const App) bool {
+            return app.hasReadySurface();
+        }
+
+        pub fn serviceFrameScheduleAt(
+            app: *App,
+            now_ns: u64,
+            comptime Timer: type,
+            timer: *Timer,
+            comptime FrameOps: type,
+            frame_ops: *FrameOps,
+        ) !void {
+            return app.serviceFrameScheduleAtWith(now_ns, Timer, timer, FrameOps, frame_ops);
+        }
+
+        pub fn serviceFrameSchedule(
+            app: *App,
+            comptime Clock: type,
+            clock: *Clock,
+            comptime Timer: type,
+            timer: *Timer,
+            comptime FrameOps: type,
+            frame_ops: *FrameOps,
+        ) void {
+            app.serviceFrameScheduleWith(Clock, clock, Timer, timer, FrameOps, frame_ops);
+        }
+
+        pub fn consumeFrameTimer(
+            app: *App,
+            comptime Reader: type,
+            reader: *Reader,
+        ) void {
+            app.consumeFrameTimerWith(Reader, reader);
         }
 
         pub fn serviceIpc(app: *App, revents: i16, now_ns: u64) void {
@@ -71,6 +147,10 @@ pub const App = struct {
 
         pub fn pollTimeoutAt(app: *App, now_ns: u64) i32 {
             return app.pollTimeoutAt(now_ns);
+        }
+
+        pub fn ipcPollTimeout(app: *App) i32 {
+            return app.ipcPollTimeout();
         }
 
         pub fn serviceReloadReady(app: *App) void {
@@ -111,6 +191,32 @@ pub const App = struct {
         }
     };
 
+    const FrameClock = struct {
+        fn now(_: *@This()) !u64 {
+            return sys.monotonicNsChecked();
+        }
+    };
+
+    const FrameTimerReader = struct {
+        fn read(_: *@This(), fd: posix.fd_t, out: []u8) !usize {
+            return posix.read(fd, out);
+        }
+    };
+
+    const ProductionFrameOps = struct {
+        fn hasReady(_: *@This(), app: *const App) bool {
+            return app.hasReadySurface();
+        }
+
+        fn render(_: *@This(), app: *App, _: u64) void {
+            const sh_ptr: ?*EffectShader = if (app.effect_shader) |*sh| sh else null;
+            const blit_ptr: ?*const BlitShader = if (app.blit_shader) |*bs| bs else null;
+            for (app.surfaces.items) |surface| {
+                surface.renderTick(sh_ptr, &app.gpu_upload_state, blit_ptr);
+            }
+        }
+    };
+
     allocator: std.mem.Allocator,
     /// Io interface and environment from std.process.Init, retained for
     /// config reloads (file reads and XDG path resolution).
@@ -136,9 +242,10 @@ pub const App = struct {
     /// no surface could be made current); prevents retrying every tick.
     gpu_pipeline_failed: bool,
     gpu_fallback_applied: bool,
-    /// Frame timer state: armed while at least one surface exists, disarmed
-    /// at zero surfaces so an output-less daemon sleeps at ~0% CPU.
-    timer_armed: bool,
+    frame_schedule: FrameSchedule,
+    frame_timer_state: FrameTimerState,
+    timer_recovery_pending: bool,
+    last_timer_error_log_ns: ?u64,
     running: bool,
     frame_interval_ns: u32,
     renderer_scale: f32,
@@ -214,7 +321,10 @@ pub const App = struct {
             .blit_shader = null,
             .gpu_pipeline_failed = false,
             .gpu_fallback_applied = false,
-            .timer_armed = false,
+            .frame_schedule = FrameSchedule.inactive(),
+            .frame_timer_state = .disarmed,
+            .timer_recovery_pending = false,
+            .last_timer_error_log_ns = null,
             .running = true,
             .frame_interval_ns = config.frame_interval_ns,
             .renderer_scale = config.renderer_scale,
@@ -326,34 +436,6 @@ pub const App = struct {
 
         self.ensureGpuPipeline();
         self.applyPermanentGpuFallback();
-        self.updateFrameTimer();
-    }
-
-    /// Arm the frame timer when surfaces exist, disarm it when none do.
-    /// Re-arming uses the *current* frame_interval_ns so a set-fps issued
-    /// while idle takes effect on resume.
-    fn updateFrameTimer(self: *App) void {
-        const want_armed = self.surfaces.items.len > 0;
-        if (want_armed == self.timer_armed) return;
-
-        if (want_armed) {
-            const ns = self.frame_interval_ns;
-            const interval = frameIntervalSpec(ns);
-            sys.timerfdSettime(self.tfd, .{}, &interval) catch |err| {
-                std.debug.print("frame timer arm failed: {}\n", .{err});
-                return;
-            };
-            self.timer_armed = true;
-            std.debug.print("frame timer armed ({}fps)\n", .{1_000_000_000 / @as(u64, ns)});
-        } else {
-            const disarm = std.mem.zeroes(linux.itimerspec);
-            sys.timerfdSettime(self.tfd, .{}, &disarm) catch |err| {
-                std.debug.print("frame timer disarm failed: {}\n", .{err});
-                return;
-            };
-            self.timer_armed = false;
-            std.debug.print("frame timer disarmed (no outputs)\n", .{});
-        }
     }
 
     /// Destroy surfaces that are dead (compositor closed the layer surface)
@@ -804,12 +886,239 @@ pub const App = struct {
         self.gpu_upload_state.markPaletteDirty(self.effect_shader != null);
     }
 
-    pub fn run(self: *App) !void {
-        const perf_logs_enabled = builtin.mode == .Debug;
-        const perf_log_interval: u64 = 120;
-        var render_tick_count: u64 = 0;
-        var render_tick_total_ns: u64 = 0;
+    fn hasReadySurface(self: *const App) bool {
+        for (self.surfaces.items) |surface| {
+            if (surface.readyForRender()) return true;
+        }
+        return false;
+    }
 
+    fn absoluteOneShotSpec(deadline_ns: u64) linux.itimerspec {
+        return .{
+            .it_value = .{
+                .sec = @intCast(deadline_ns / std.time.ns_per_s),
+                .nsec = @intCast(deadline_ns % std.time.ns_per_s),
+            },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+    }
+
+    fn relativeOneShotSpec(interval_ns: u32) linux.itimerspec {
+        return .{
+            .it_value = .{
+                .sec = @intCast(interval_ns / std.time.ns_per_s),
+                .nsec = @intCast(interval_ns % std.time.ns_per_s),
+            },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+    }
+
+    fn disarmSpec() linux.itimerspec {
+        return std.mem.zeroes(linux.itimerspec);
+    }
+
+    fn timerStatesEqual(a: FrameTimerState, b: FrameTimerState) bool {
+        return switch (a) {
+            .disarmed => b == .disarmed,
+            .relative_recovery => b == .relative_recovery,
+            .absolute => |a_deadline| switch (b) {
+                .absolute => |b_deadline| a_deadline == b_deadline,
+                else => false,
+            },
+        };
+    }
+
+    fn installFrameTimerWith(
+        self: *App,
+        desired: FrameTimerState,
+        comptime Timer: type,
+        timer: *Timer,
+    ) !void {
+        if (timerStatesEqual(self.frame_timer_state, desired)) {
+            self.timer_recovery_pending = false;
+            return;
+        }
+
+        switch (desired) {
+            .disarmed => {
+                const spec = disarmSpec();
+                try timer.set(self.tfd, .{}, &spec);
+            },
+            .absolute => |deadline_ns| {
+                const spec = absoluteOneShotSpec(deadline_ns);
+                try timer.set(self.tfd, .{ .ABSTIME = true }, &spec);
+            },
+            .relative_recovery => {
+                const spec = relativeOneShotSpec(self.frame_interval_ns);
+                try timer.set(self.tfd, .{}, &spec);
+            },
+        }
+        self.frame_timer_state = desired;
+        self.timer_recovery_pending = false;
+    }
+
+    fn applyFadeAt(self: *App, now_ns: u64) void {
+        const fade = self.fade orelse return;
+        const sample = color_fade.sample(fade, now_ns);
+        self.effect.updatePalette(sample.colors);
+        self.markGpuPaletteDirty();
+        self.current_palette = sample.colors;
+        if (sample.done) self.fade = null;
+    }
+
+    fn serviceFrameScheduleAtWith(
+        self: *App,
+        now_ns: u64,
+        comptime Timer: type,
+        timer: *Timer,
+        comptime FrameOps: type,
+        frame_ops: *FrameOps,
+    ) !void {
+        if (self.surfaces.items.len == 0) {
+            try self.installFrameTimerWith(.disarmed, Timer, timer);
+            self.frame_schedule = FrameSchedule.inactive();
+            return;
+        }
+
+        if (!frame_ops.hasReady(self)) {
+            try self.installFrameTimerWith(.disarmed, Timer, timer);
+            return;
+        }
+
+        if (self.frame_schedule.next_logical_deadline_ns == null) {
+            const candidate = try FrameSchedule.begin(now_ns, self.frame_interval_ns);
+            const deadline_ns = candidate.next_logical_deadline_ns.?;
+            try self.installFrameTimerWith(.{ .absolute = deadline_ns }, Timer, timer);
+            self.frame_schedule = candidate;
+            return;
+        }
+
+        switch (try self.frame_schedule.plan(now_ns, self.frame_interval_ns)) {
+            .paused => unreachable,
+            .wait => |deadline_ns| {
+                try self.installFrameTimerWith(.{ .absolute = deadline_ns }, Timer, timer);
+            },
+            .due => |due| {
+                self.frame_schedule = due.next;
+                self.animation.advance(due.elapsed_ticks);
+                self.applyFadeAt(now_ns);
+                frame_ops.render(self, now_ns);
+
+                if (frame_ops.hasReady(self)) {
+                    try self.installFrameTimerWith(
+                        .{ .absolute = due.next.next_logical_deadline_ns.? },
+                        Timer,
+                        timer,
+                    );
+                } else {
+                    try self.installFrameTimerWith(.disarmed, Timer, timer);
+                }
+            },
+        }
+    }
+
+    fn noteFrameTimerMutationFailure(self: *App, err: anyerror, now_ns: ?u64) void {
+        const was_pending = self.timer_recovery_pending;
+        self.timer_recovery_pending = true;
+
+        if (now_ns) |now| {
+            if (self.last_timer_error_log_ns) |last| {
+                if (last == std.math.maxInt(u64)) {
+                    self.last_timer_error_log_ns = now;
+                    return;
+                }
+                if (now < last or now - last < std.time.ns_per_s) return;
+            }
+            std.debug.print("frame timer recovery pending after error: {}\n", .{err});
+            self.last_timer_error_log_ns = now;
+            return;
+        }
+
+        if (was_pending or self.last_timer_error_log_ns != null) return;
+        std.debug.print("frame timer recovery pending after error: {}\n", .{err});
+        self.last_timer_error_log_ns = std.math.maxInt(u64);
+    }
+
+    fn observeFrameClock(self: *App, now_ns: u64) void {
+        const last = self.last_timer_error_log_ns orelse return;
+        if (last == std.math.maxInt(u64)) {
+            self.last_timer_error_log_ns = now_ns;
+            return;
+        }
+        if (now_ns >= last and now_ns - last >= std.time.ns_per_s) {
+            self.last_timer_error_log_ns = null;
+        }
+    }
+
+    fn recoverFrameTimerWithoutClockWith(
+        self: *App,
+        clock_err: anyerror,
+        comptime Timer: type,
+        timer: *Timer,
+        comptime FrameOps: type,
+        frame_ops: *FrameOps,
+    ) void {
+        if (self.frame_timer_state.isArmed()) return;
+        if (self.surfaces.items.len == 0 or !frame_ops.hasReady(self)) return;
+
+        self.noteFrameTimerMutationFailure(clock_err, null);
+        self.installFrameTimerWith(.relative_recovery, Timer, timer) catch |timer_err| {
+            self.noteFrameTimerMutationFailure(timer_err, null);
+            return;
+        };
+    }
+
+    fn serviceFrameScheduleWith(
+        self: *App,
+        comptime Clock: type,
+        clock: *Clock,
+        comptime Timer: type,
+        timer: *Timer,
+        comptime FrameOps: type,
+        frame_ops: *FrameOps,
+    ) void {
+        const now_ns = clock.now() catch |err| {
+            self.recoverFrameTimerWithoutClockWith(err, Timer, timer, FrameOps, frame_ops);
+            return;
+        };
+        self.observeFrameClock(now_ns);
+        self.serviceFrameScheduleAtWith(now_ns, Timer, timer, FrameOps, frame_ops) catch |err| {
+            self.noteFrameTimerMutationFailure(err, now_ns);
+        };
+    }
+
+    fn serviceFrameSchedule(self: *App) void {
+        var clock = FrameClock{};
+        var timer = FrameTimer{};
+        var frame_ops = ProductionFrameOps{};
+        self.serviceFrameScheduleWith(
+            FrameClock,
+            &clock,
+            FrameTimer,
+            &timer,
+            ProductionFrameOps,
+            &frame_ops,
+        );
+    }
+
+    fn consumeFrameTimerWith(
+        self: *App,
+        comptime Reader: type,
+        reader: *Reader,
+    ) void {
+        self.frame_timer_state = .disarmed;
+        var buf: [8]u8 = undefined;
+        const bytes_read = reader.read(self.tfd, &buf) catch |err| {
+            self.noteFrameTimerMutationFailure(err, null);
+            return;
+        };
+        _ = timer_expirations.decode(buf[0..bytes_read]) catch |err| {
+            self.noteFrameTimerMutationFailure(err, null);
+            return;
+        };
+    }
+
+    pub fn run(self: *App) !void {
         // Create surfaces for outputs known at startup.
         self.syncSurfaces();
 
@@ -818,11 +1127,12 @@ pub const App = struct {
         // ready before the first timer tick.
         if (c.wl_display_roundtrip(self.display) < 0) return error.RoundtripFailed;
         self.syncSurfaces();
+        self.serviceFrameSchedule();
 
         // --- poll+timerfd main loop ---
-        // tfd was created in App.init and stored as self.tfd; syncSurfaces
-        // arms/disarms it as surfaces come and go (zero-output start stays
-        // disarmed until the first output arrives).
+        // tfd was created in App.init and stored as self.tfd. The scheduling
+        // service below installs absolute one-shots only while a surface is
+        // callback-ready; an output-less or callback-blocked daemon sleeps.
         const tfd = self.tfd;
 
         const wl_fd: posix.fd_t = c.wl_display_get_fd(self.display);
@@ -854,6 +1164,7 @@ pub const App = struct {
                 self.syncSurfaces();
                 _ = self.ipcPollTimeout();
                 if (!self.running) break;
+                self.serviceFrameSchedule();
                 continue;
             }
 
@@ -902,51 +1213,8 @@ pub const App = struct {
             if (!self.running) break;
 
             if (fds[1].revents & linux.POLL.IN != 0) {
-                var buf: [8]u8 = undefined;
-                const expiration_count: ?u64 = blk: {
-                    const bytes_read = posix.read(tfd, &buf) catch |err| {
-                        std.debug.print("timerfd read failed: {}; skipping timer event\n", .{err});
-                        break :blk null;
-                    };
-                    break :blk timer_expirations.decode(buf[0..bytes_read]) catch |err| {
-                        std.debug.print("timerfd decode failed: {}; skipping timer event\n", .{err});
-                        break :blk null;
-                    };
-                };
-
-                if (expiration_count) |expirations| {
-                    self.animation.advance(expirations);
-
-                    const render_tick_start_ns: u64 = if (perf_logs_enabled) sys.monotonicNs() else 0;
-
-                    // Advance an in-flight palette fade once per tick (before drawing
-                    // surfaces, which read the shared App.effect palette). Time-based
-                    // so it is frame-rate-independent and self-completes if frames are
-                    // sparse; settles on the exact target when the duration elapses.
-                    if (self.fade) |f| {
-                        const s = color_fade.sample(f, sys.monotonicNs());
-                        self.effect.updatePalette(s.colors);
-                        self.markGpuPaletteDirty();
-                        self.current_palette = s.colors;
-                        if (s.done) self.fade = null;
-                    }
-
-                    const sh_ptr: ?*EffectShader = if (self.effect_shader) |*sh| sh else null;
-                    const blit_ptr: ?*const BlitShader = if (self.blit_shader) |*bs| bs else null;
-                    for (self.surfaces.items) |s| {
-                        s.renderTick(sh_ptr, &self.gpu_upload_state, blit_ptr);
-                    }
-                    if (perf_logs_enabled) {
-                        const render_tick_end_ns: u64 = sys.monotonicNs();
-                        render_tick_count += 1;
-                        render_tick_total_ns += render_tick_end_ns - render_tick_start_ns;
-                        if (render_tick_count % perf_log_interval == 0) {
-                            const avg_tick_ms = @as(f64, @floatFromInt(render_tick_total_ns / perf_log_interval)) / std.time.ns_per_ms;
-                            std.debug.print("perf: average renderTick over last {} timer ticks: {d:.3}ms across {} surfaces\n", .{ perf_log_interval, avg_tick_ms, self.surfaces.items.len });
-                            render_tick_total_ns = 0;
-                        }
-                    }
-                }
+                var reader = FrameTimerReader{};
+                self.consumeFrameTimerWith(FrameTimerReader, &reader);
             }
 
             if (fds[2].revents & linux.POLL.IN != 0) {
@@ -979,6 +1247,7 @@ pub const App = struct {
                     self.serviceReloadReady();
                 }
             }
+            if (self.running) self.serviceFrameSchedule();
         }
     }
 
@@ -1041,6 +1310,16 @@ pub const App = struct {
         return @min(current, candidate);
     }
 
+    fn frameRecoveryTimeoutMs(self: *const App, now_ns: u64) i32 {
+        const deadline_ns = self.frame_schedule.next_logical_deadline_ns orelse
+            return recovery_cap_ms;
+        if (deadline_ns <= now_ns) return 0;
+        const remaining_ns = deadline_ns - now_ns;
+        const rounded_ms = (remaining_ns +| (std.time.ns_per_ms - 1)) /
+            std.time.ns_per_ms;
+        return @intCast(@min(@as(u64, recovery_cap_ms), rounded_ms));
+    }
+
     fn pollTimeoutAt(self: *App, now_ns: u64) i32 {
         var timeout_ms: i32 = -1;
 
@@ -1071,11 +1350,15 @@ pub const App = struct {
         };
         if (reload_response_expired) self.destroyReloadJob();
 
+        if (self.timer_recovery_pending) {
+            timeout_ms = minPollTimeout(timeout_ms, self.frameRecoveryTimeoutMs(now_ns));
+        }
+
         return timeout_ms;
     }
 
     fn ipcPollTimeout(self: *App) i32 {
-        var has_deadline = self.ipc_client != null;
+        var has_deadline = self.ipc_client != null or self.timer_recovery_pending;
         var loading_reload = false;
         if (self.reload_job) |job| switch (job.phase) {
             .loading, .orphaned => loading_reload = true,
@@ -1090,7 +1373,12 @@ pub const App = struct {
             if (self.reload_job) |job| {
                 if (job.phase == .responding) self.destroyReloadJob();
             }
-            return if (self.reload_job != null) 500 else -1;
+            return if (self.timer_recovery_pending)
+                recovery_cap_ms
+            else if (self.reload_job != null)
+                500
+            else
+                -1;
         };
         return self.pollTimeoutAt(now_ns);
     }
@@ -1434,9 +1722,9 @@ pub const App = struct {
             var buf: [64]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
-                "timerfd_settime failed: {}",
+                "frame pacing update failed: {}",
                 .{err},
-            ) catch "timerfd_settime failed";
+            ) catch "frame pacing update failed";
             dispatch.appendError(out, msg);
             return;
         };
@@ -1446,28 +1734,32 @@ pub const App = struct {
     fn applyFrameIntervalWith(
         self: *App,
         interval_ns: u32,
+        comptime Clock: type,
+        clock: *Clock,
         comptime Timer: type,
         timer: *Timer,
     ) !void {
-        if (self.timer_armed) {
-            const interval = frameIntervalSpec(interval_ns);
-            try timer.set(self.tfd, .{}, &interval);
+        if (self.surfaces.items.len == 0) {
+            self.frame_interval_ns = interval_ns;
+            self.frame_schedule = FrameSchedule.inactive();
+            return;
         }
-        self.frame_interval_ns = interval_ns;
-    }
 
-    fn frameIntervalSpec(interval_ns: u32) linux.itimerspec {
-        const seconds = interval_ns / std.time.ns_per_s;
-        const nanoseconds = interval_ns % std.time.ns_per_s;
-        return .{
-            .it_value = .{ .sec = seconds, .nsec = nanoseconds },
-            .it_interval = .{ .sec = seconds, .nsec = nanoseconds },
-        };
+        const now_ns = try clock.now();
+        const candidate = try self.frame_schedule.rebase(now_ns, interval_ns);
+        const desired: FrameTimerState = if (self.hasReadySurface())
+            .{ .absolute = candidate.next_logical_deadline_ns.? }
+        else
+            .disarmed;
+        try self.installFrameTimerWith(desired, Timer, timer);
+        self.frame_interval_ns = interval_ns;
+        self.frame_schedule = candidate;
     }
 
     fn applyFrameInterval(self: *App, interval_ns: u32) !void {
+        var clock = FrameClock{};
         var timer = FrameTimer{};
-        try self.applyFrameIntervalWith(interval_ns, FrameTimer, &timer);
+        try self.applyFrameIntervalWith(interval_ns, FrameClock, &clock, FrameTimer, &timer);
     }
 
     fn handleSetScale(self: *App, out: *ResponseQueue, scale: f32) void {
@@ -1714,9 +2006,9 @@ pub const App = struct {
                     var buf: [64]u8 = undefined;
                     const msg = std.fmt.bufPrint(
                         &buf,
-                        "timerfd_settime failed: {}",
+                        "frame pacing update failed: {}",
                         .{err},
-                    ) catch "timerfd_settime failed";
+                    ) catch "frame pacing update failed";
                     appendReloadError(job, msg);
                     self.beginReloadResponse(job);
                     return;
@@ -1730,12 +2022,14 @@ pub const App = struct {
     fn applyReloadSnapshotWith(
         self: *App,
         candidate: *config_mod.LoadResult,
+        comptime Clock: type,
+        clock: *Clock,
         comptime Timer: type,
         timer: *Timer,
     ) !void {
         const cfg = &candidate.config;
 
-        self.applyFrameIntervalWith(cfg.frame_interval_ns, Timer, timer) catch |err| {
+        self.applyFrameIntervalWith(cfg.frame_interval_ns, Clock, clock, Timer, timer) catch |err| {
             candidate.deinit(self.allocator);
             return err;
         };
@@ -1761,8 +2055,9 @@ pub const App = struct {
         self: *App,
         candidate: *config_mod.LoadResult,
     ) !void {
+        var clock = FrameClock{};
         var timer = ReloadFrameTimer{};
-        try self.applyReloadSnapshotWith(candidate, ReloadFrameTimer, &timer);
+        try self.applyReloadSnapshotWith(candidate, FrameClock, &clock, ReloadFrameTimer, &timer);
     }
 
     fn applyReloadEffectConfig(self: *App, cfg: *const AppConfig) void {

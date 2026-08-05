@@ -349,6 +349,19 @@ pub fn build(b: *std.Build) void {
     reload_test_step.dependOn(&run_app_reload_tests.step);
     test_step.dependOn(&run_app_reload_tests.step);
 
+    const frame_pacing_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wayland_egl/frame_pacing_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    frame_pacing_test_mod.addImport("wayland_test", wayland_exports_mod);
+    const frame_pacing_tests = b.addTest(.{
+        .root_module = frame_pacing_test_mod,
+    });
+    const run_frame_pacing_tests = b.addRunArtifact(frame_pacing_tests);
+    phase2_test_step.dependOn(&run_frame_pacing_tests.step);
+    test_step.dependOn(&run_frame_pacing_tests.step);
+
     const effect_shader_api_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wayland_egl/effect_shader_api_test.zig"),
         .target = target,
