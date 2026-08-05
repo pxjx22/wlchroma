@@ -13,6 +13,52 @@ test "App owns the only animation state" {
     try std.testing.expect(!@hasField(wayland.colormix.ColormixRenderer, "frames"));
 }
 
+test "surface readiness requires live configured callback-free Wayland state" {
+    var output: wayland.output.OutputInfo = undefined;
+    output.removed = false;
+
+    var state: SurfaceState = undefined;
+    state.output = &output;
+    state.dead = false;
+    state.torn_down = false;
+    state.configured = true;
+    state.extent = try wayland.dimensions.Extent.init(1920, 1080);
+    state.frame_callback = null;
+    state.layer_surface = .{
+        .wl_surface = @as(*wayland.c.wl_surface, @ptrFromInt(0x1000)),
+        .layer_surface = null,
+    };
+
+    try std.testing.expect(state.readyForRender());
+
+    state.dead = true;
+    try std.testing.expect(!state.readyForRender());
+    state.dead = false;
+
+    state.torn_down = true;
+    try std.testing.expect(!state.readyForRender());
+    state.torn_down = false;
+
+    output.removed = true;
+    try std.testing.expect(!state.readyForRender());
+    output.removed = false;
+
+    state.configured = false;
+    try std.testing.expect(!state.readyForRender());
+    state.configured = true;
+
+    state.extent = null;
+    try std.testing.expect(!state.readyForRender());
+    state.extent = try wayland.dimensions.Extent.init(1920, 1080);
+
+    state.frame_callback = @as(*wayland.c.wl_callback, @ptrFromInt(0x2000));
+    try std.testing.expect(!state.readyForRender());
+    state.frame_callback = null;
+
+    state.layer_surface.wl_surface = null;
+    try std.testing.expect(!state.readyForRender());
+}
+
 fn setDetachFields(state: *SurfaceState, dead: bool, configured: bool, has_extent: bool) void {
     state.dead = dead;
     state.configured = configured;

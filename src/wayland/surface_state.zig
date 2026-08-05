@@ -160,6 +160,16 @@ pub const SurfaceState = struct {
         return self;
     }
 
+    pub fn readyForRender(self: *const SurfaceState) bool {
+        return !self.dead and
+            !self.torn_down and
+            !self.output.removed and
+            self.configured and
+            self.extent != null and
+            self.frame_callback == null and
+            self.layer_surface.wl_surface != null;
+    }
+
     /// Called by the timerfd tick in the main loop (~15fps).
     pub fn renderTick(
         self: *SurfaceState,
@@ -167,13 +177,9 @@ pub const SurfaceState = struct {
         upload_state: *GpuUploadState,
         blit_shader: ?*const BlitShader,
     ) void {
-        if (self.dead) return;
-        if (!self.configured) return;
-        const extent = self.extent orelse return;
-
-        if (self.frame_callback != null) return;
-
-        const wl_surface = self.layer_surface.wl_surface orelse return;
+        if (!self.readyForRender()) return;
+        const extent = self.extent.?;
+        const wl_surface = self.layer_surface.wl_surface.?;
 
         // EGL path: render via GPU when an EGL surface is available.
         if (self.egl_surface) |*egl_surf| {
