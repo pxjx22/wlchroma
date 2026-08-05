@@ -33,12 +33,19 @@ const new_colors: [3]Rgb = .{
 const FakeTimer = struct {
     calls: usize = 0,
     last_fd: ?std.posix.fd_t = null,
+    last_flags: ?linux.TFD.TIMER = null,
     last_interval: ?std.os.linux.itimerspec = null,
     fail: bool = false,
 
-    pub fn set(self: *@This(), fd: std.posix.fd_t, value: *const std.os.linux.itimerspec) !void {
+    pub fn set(
+        self: *@This(),
+        fd: std.posix.fd_t,
+        flags: linux.TFD.TIMER,
+        value: *const std.os.linux.itimerspec,
+    ) !void {
         self.calls += 1;
         self.last_fd = fd;
+        self.last_flags = flags;
         self.last_interval = value.*;
         if (self.fail) return error.TimerFdSetTimeFailed;
     }
@@ -816,6 +823,7 @@ test "armed frame interval commits only after timer success" {
 
     try std.testing.expectEqual(@as(usize, 1), timer.calls);
     try std.testing.expectEqual(@as(std.posix.fd_t, 42), timer.last_fd.?);
+    try std.testing.expectEqual(false, timer.last_flags.?.ABSTIME);
     try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_value.sec);
     try std.testing.expectEqual(@as(i64, 33_333_333), timer.last_interval.?.it_value.nsec);
     try std.testing.expectEqual(@as(i64, 0), timer.last_interval.?.it_interval.sec);

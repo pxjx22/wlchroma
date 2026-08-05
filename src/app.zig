@@ -87,17 +87,27 @@ pub const App = struct {
     } else void;
 
     const FrameTimer = struct {
-        fn set(_: *@This(), fd: posix.fd_t, value: *const linux.itimerspec) !void {
-            try sys.timerfdSettime(fd, value);
+        fn set(
+            _: *@This(),
+            fd: posix.fd_t,
+            flags: linux.TFD.TIMER,
+            value: *const linux.itimerspec,
+        ) !void {
+            try sys.timerfdSettime(fd, flags, value);
         }
     };
 
     const ReloadFrameTimer = struct {
-        fn set(_: *@This(), fd: posix.fd_t, value: *const linux.itimerspec) !void {
+        fn set(
+            _: *@This(),
+            fd: posix.fd_t,
+            flags: linux.TFD.TIMER,
+            value: *const linux.itimerspec,
+        ) !void {
             if (build_options.phase3c_force_reload_timer_failure) {
                 return error.TimerFdSetTimeFailed;
             }
-            try sys.timerfdSettime(fd, value);
+            try sys.timerfdSettime(fd, flags, value);
         }
     };
 
@@ -329,7 +339,7 @@ pub const App = struct {
         if (want_armed) {
             const ns = self.frame_interval_ns;
             const interval = frameIntervalSpec(ns);
-            sys.timerfdSettime(self.tfd, &interval) catch |err| {
+            sys.timerfdSettime(self.tfd, .{}, &interval) catch |err| {
                 std.debug.print("frame timer arm failed: {}\n", .{err});
                 return;
             };
@@ -337,7 +347,7 @@ pub const App = struct {
             std.debug.print("frame timer armed ({}fps)\n", .{1_000_000_000 / @as(u64, ns)});
         } else {
             const disarm = std.mem.zeroes(linux.itimerspec);
-            sys.timerfdSettime(self.tfd, &disarm) catch |err| {
+            sys.timerfdSettime(self.tfd, .{}, &disarm) catch |err| {
                 std.debug.print("frame timer disarm failed: {}\n", .{err});
                 return;
             };
@@ -1441,7 +1451,7 @@ pub const App = struct {
     ) !void {
         if (self.timer_armed) {
             const interval = frameIntervalSpec(interval_ns);
-            try timer.set(self.tfd, &interval);
+            try timer.set(self.tfd, .{}, &interval);
         }
         self.frame_interval_ns = interval_ns;
     }

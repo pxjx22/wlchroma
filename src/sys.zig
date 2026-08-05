@@ -161,8 +161,12 @@ pub fn timerfdCreate(clockid: linux.timerfd_clockid_t, flags: linux.TFD) !fd_t {
     return @intCast(rc);
 }
 
-pub fn timerfdSettime(fd: fd_t, new_value: *const linux.itimerspec) !void {
-    if (linux.errno(linux.timerfd_settime(fd, .{}, new_value, null)) != .SUCCESS) {
+pub fn timerfdSettime(
+    fd: fd_t,
+    flags: linux.TFD.TIMER,
+    new_value: *const linux.itimerspec,
+) !void {
+    if (linux.errno(linux.timerfd_settime(fd, flags, new_value, null)) != .SUCCESS) {
         return error.TimerFdSetTimeFailed;
     }
 }
