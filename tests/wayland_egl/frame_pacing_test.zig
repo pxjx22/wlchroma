@@ -758,6 +758,26 @@ test "ordinary clock failure preserves a trusted installed timer" {
     try std.testing.expect(!fixture.app.timer_recovery_pending);
 }
 
+test "clock failure clears pending recovery when every surface is unready" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(1, 20);
+    defer fixture.deinit();
+    fixture.storage[0].frame_callback = @ptrFromInt(0x3000);
+    fixture.app.frame_schedule = try FrameSchedule.begin(100, 20);
+    fixture.app.timer_recovery_pending = true;
+    var clock = FakeClock{ .failure = error.ClockGetTimeFailed };
+    var timer = FakeTimer{};
+    var ops = FakeFrameOps{ .ready = App.TestAdapter.hasReadySurface(&fixture.app) };
+
+    App.TestAdapter.serviceFrameSchedule(&fixture.app, FakeClock, &clock, FakeTimer, &timer, FakeFrameOps, &ops);
+
+    try std.testing.expectEqual(@as(usize, 0), timer.calls);
+    try std.testing.expectEqual(@as(?u64, 120), fixture.app.frame_schedule.next_logical_deadline_ns);
+    try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+    try std.testing.expect(!fixture.app.timer_recovery_pending);
+    try std.testing.expectEqual(@as(i32, -1), App.TestAdapter.pollTimeoutAt(&fixture.app, 200));
+}
+
 test "failed relative recovery clamps poll timeout to 100ms" {
     var fixture: PacingFixture = undefined;
     try fixture.init(1, 20);

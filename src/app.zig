@@ -1058,7 +1058,11 @@ pub const App = struct {
         frame_ops: *FrameOps,
     ) void {
         if (self.frame_timer_state.isArmed()) return;
-        if (self.surfaces.items.len == 0 or !frame_ops.hasReady(self)) return;
+        if (self.surfaces.items.len == 0) return;
+        if (!frame_ops.hasReady(self)) {
+            self.timer_recovery_pending = false;
+            return;
+        }
 
         self.noteFrameTimerMutationFailure(clock_err, null);
         self.installFrameTimerWith(.relative_recovery, Timer, timer) catch |timer_err| {
