@@ -196,6 +196,31 @@ test "initial ready surface installs the first absolute one-shot" {
     try std.testing.expectEqual(@as(i64, 120), timer.last_spec.?.it_value.nsec);
 }
 
+test "inactive ready surface does not publish deadline when first arm fails" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(1, 20);
+    defer fixture.deinit();
+    var clock = FakeClock{ .value = 100 };
+    var timer = FakeTimer{ .fail = true };
+    var ops = FakeFrameOps{ .ready = true };
+
+    App.TestAdapter.serviceFrameSchedule(
+        &fixture.app,
+        FakeClock,
+        &clock,
+        FakeTimer,
+        &timer,
+        FakeFrameOps,
+        &ops,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), timer.calls);
+    try std.testing.expectEqual(@as(?u64, null), fixture.app.frame_schedule.next_logical_deadline_ns);
+    try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+    try std.testing.expect(fixture.app.timer_recovery_pending);
+    try std.testing.expectEqual(@as(i32, 100), App.TestAdapter.pollTimeoutAt(&fixture.app, 100));
+}
+
 test "zero surfaces pause schedule and disarm once" {
     var fixture: PacingFixture = undefined;
     try fixture.init(0, 4);

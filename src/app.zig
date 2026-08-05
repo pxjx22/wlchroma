@@ -980,19 +980,22 @@ pub const App = struct {
             return;
         }
 
-        if (self.frame_schedule.next_logical_deadline_ns == null) {
-            self.frame_schedule = try FrameSchedule.begin(now_ns, self.frame_interval_ns);
+        var candidate_schedule = self.frame_schedule;
+        if (candidate_schedule.next_logical_deadline_ns == null) {
+            candidate_schedule = try FrameSchedule.begin(now_ns, self.frame_interval_ns);
         }
 
         if (!frame_ops.hasReady(self)) {
             try self.installFrameTimerWith(.disarmed, Timer, timer);
+            self.frame_schedule = candidate_schedule;
             return;
         }
 
-        switch (try self.frame_schedule.plan(now_ns, self.frame_interval_ns)) {
+        switch (try candidate_schedule.plan(now_ns, self.frame_interval_ns)) {
             .paused => unreachable,
             .wait => |deadline_ns| {
                 try self.installFrameTimerWith(.{ .absolute = deadline_ns }, Timer, timer);
+                self.frame_schedule = candidate_schedule;
             },
             .due => |due| {
                 self.frame_schedule = due.next;
