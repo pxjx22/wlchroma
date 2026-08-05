@@ -215,6 +215,75 @@ test "zero surfaces pause schedule and disarm once" {
     try std.testing.expectEqual(@as(usize, 1), timer.calls);
 }
 
+test "zero surfaces pause without sampling a failing clock" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(0, 20);
+    defer fixture.deinit();
+    fixture.app.frame_schedule = try FrameSchedule.begin(100, 20);
+    var clock = FakeClock{ .failure = error.ClockGetTimeFailed };
+    var timer = FakeTimer{};
+    var ops = FakeFrameOps{ .ready = false };
+
+    App.TestAdapter.serviceFrameSchedule(
+        &fixture.app,
+        FakeClock,
+        &clock,
+        FakeTimer,
+        &timer,
+        FakeFrameOps,
+        &ops,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), clock.calls);
+    try std.testing.expectEqual(@as(?u64, null), fixture.app.frame_schedule.next_logical_deadline_ns);
+    try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+    try std.testing.expect(!fixture.app.timer_recovery_pending);
+}
+
+test "zero surfaces pause logical schedule when timer disarm fails" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(0, 20);
+    defer fixture.deinit();
+    fixture.app.frame_schedule = try FrameSchedule.begin(100, 20);
+    App.TestAdapter.seedFrameTimerAbsolute(&fixture.app, 120);
+    var clock = FakeClock{ .value = 200 };
+    var timer = FakeTimer{ .fail = true };
+    var ops = FakeFrameOps{ .ready = false };
+
+    App.TestAdapter.serviceFrameSchedule(
+        &fixture.app,
+        FakeClock,
+        &clock,
+        FakeTimer,
+        &timer,
+        FakeFrameOps,
+        &ops,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), clock.calls);
+    try std.testing.expectEqual(@as(usize, 1), timer.calls);
+    try std.testing.expectEqual(@as(?u64, null), fixture.app.frame_schedule.next_logical_deadline_ns);
+    try std.testing.expectEqual(@as(?u64, 120), App.TestAdapter.timerDeadline(&fixture.app));
+    try std.testing.expect(fixture.app.timer_recovery_pending);
+    try std.testing.expectEqual(@as(i32, 100), App.TestAdapter.pollTimeoutAt(&fixture.app, 200));
+}
+
+test "inactive schedule starts while the only surface is unconfigured" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(1, 20);
+    defer fixture.deinit();
+    fixture.storage[0].configured = false;
+    var timer = FakeTimer{};
+    var ops = FakeFrameOps{ .ready = App.TestAdapter.hasReadySurface(&fixture.app) };
+
+    try service(&fixture, 100, &timer, &ops);
+
+    try std.testing.expectEqual(@as(?u64, 120), fixture.app.frame_schedule.next_logical_deadline_ns);
+    try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+    try std.testing.expectEqual(@as(usize, 0), timer.calls);
+    try std.testing.expectEqual(@as(usize, 0), ops.renders);
+}
+
 test "render success blocks and disarms while render failure schedules retry" {
     var blocked: PacingFixture = undefined;
     try blocked.init(1, 4);

@@ -975,21 +975,17 @@ pub const App = struct {
         frame_ops: *FrameOps,
     ) !void {
         if (self.surfaces.items.len == 0) {
-            try self.installFrameTimerWith(.disarmed, Timer, timer);
             self.frame_schedule = FrameSchedule.inactive();
-            return;
-        }
-
-        if (!frame_ops.hasReady(self)) {
             try self.installFrameTimerWith(.disarmed, Timer, timer);
             return;
         }
 
         if (self.frame_schedule.next_logical_deadline_ns == null) {
-            const candidate = try FrameSchedule.begin(now_ns, self.frame_interval_ns);
-            const deadline_ns = candidate.next_logical_deadline_ns.?;
-            try self.installFrameTimerWith(.{ .absolute = deadline_ns }, Timer, timer);
-            self.frame_schedule = candidate;
+            self.frame_schedule = try FrameSchedule.begin(now_ns, self.frame_interval_ns);
+        }
+
+        if (!frame_ops.hasReady(self)) {
+            try self.installFrameTimerWith(.disarmed, Timer, timer);
             return;
         }
 
@@ -1077,6 +1073,13 @@ pub const App = struct {
         comptime FrameOps: type,
         frame_ops: *FrameOps,
     ) void {
+        if (self.surfaces.items.len == 0) {
+            self.serviceFrameScheduleAtWith(0, Timer, timer, FrameOps, frame_ops) catch |err| {
+                self.noteFrameTimerMutationFailure(err, null);
+            };
+            return;
+        }
+
         const now_ns = clock.now() catch |err| {
             self.recoverFrameTimerWithoutClockWith(err, Timer, timer, FrameOps, frame_ops);
             return;
