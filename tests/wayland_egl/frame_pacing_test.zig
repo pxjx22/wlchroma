@@ -44,6 +44,16 @@ const FakeFrameOps = struct {
     }
 };
 
+const FakeCallbackDestroy = struct {
+    calls: usize = 0,
+    destroyed: ?*wayland.c.wl_callback = null,
+
+    pub fn destroy(self: *@This(), callback: ?*wayland.c.wl_callback) void {
+        self.calls += 1;
+        self.destroyed = callback;
+    }
+};
+
 const PacingFixture = struct {
     app: App,
     storage: [2]SurfaceState,
@@ -146,6 +156,42 @@ test "all callback-blocked surfaces disarm without consuming overdue work" {
     try std.testing.expectEqual(@as(f64, 0), fixture.app.animation.phase);
     try std.testing.expectEqual(@as(?u64, 4), fixture.app.frame_schedule.next_logical_deadline_ns);
     try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+}
+
+// Mutation caught: doing render, animation, or timer work from frameCallbackDone.
+test "frame callback completion only releases ownership before scheduler reconciliation" {
+    var fixture: PacingFixture = undefined;
+    try fixture.init(1, 20);
+    defer fixture.deinit();
+    fixture.app.frame_schedule = try FrameSchedule.begin(100, 20);
+    const callback: *wayland.c.wl_callback = @ptrFromInt(0x3000);
+    fixture.storage[0].frame_callback = callback;
+    const schedule_before = fixture.app.frame_schedule;
+    const phase_before = fixture.app.animation.phase;
+    var destroy = FakeCallbackDestroy{};
+
+    SurfaceState.TestAdapter.completeFrameCallback(
+        &fixture.storage[0],
+        callback,
+        FakeCallbackDestroy,
+        &destroy,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), destroy.calls);
+    try std.testing.expectEqual(callback, destroy.destroyed.?);
+    try std.testing.expectEqual(@as(?*wayland.c.wl_callback, null), fixture.storage[0].frame_callback);
+    try std.testing.expectEqualDeep(schedule_before, fixture.app.frame_schedule);
+    try std.testing.expectEqual(phase_before, fixture.app.animation.phase);
+    try std.testing.expectEqual(App.TestAdapter.TimerMode.disarmed, App.TestAdapter.timerMode(&fixture.app));
+
+    var timer = FakeTimer{};
+    var ops = FakeFrameOps{ .ready = App.TestAdapter.hasReadySurface(&fixture.app), .block_after_render = false };
+    try service(&fixture, 130, &timer, &ops);
+
+    try std.testing.expectEqual(@as(usize, 1), ops.renders);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.02), fixture.app.animation.phase, 1e-12);
+    try std.testing.expectEqual(@as(?u64, 140), App.TestAdapter.timerDeadline(&fixture.app));
+    try std.testing.expectEqual(@as(usize, 1), timer.calls);
 }
 
 test "callback before deadline reuses the absolute deadline" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("../wl.zig").c;
 const LayerSurface = @import("layer_shell.zig").LayerSurface;
 const ShmPool = @import("shm_pool.zig").ShmPool;
@@ -49,6 +50,17 @@ pub const BufReleaseCtx = struct {
 };
 
 pub const SurfaceState = struct {
+    pub const TestAdapter = if (builtin.is_test) struct {
+        pub fn completeFrameCallback(
+            self: *SurfaceState,
+            callback: ?*c.wl_callback,
+            comptime CallbackDestroy: type,
+            callback_destroy: *CallbackDestroy,
+        ) void {
+            frameCallbackDoneWith(self, callback, CallbackDestroy, callback_destroy);
+        }
+    } else void;
+
     allocator: std.mem.Allocator,
     /// Owning output. The reaper in App.syncSurfaces uses this link to
     /// associate surfaces with removed outputs.
@@ -170,7 +182,8 @@ pub const SurfaceState = struct {
             self.layer_surface.wl_surface != null;
     }
 
-    /// Called by the timerfd tick in the main loop (~15fps).
+    /// App's callback-aware scheduler calls renderTick for callback-ready
+    /// surfaces when a logical frame is due.
     pub fn renderTick(
         self: *SurfaceState,
         shader: ?*EffectShader,
@@ -571,8 +584,9 @@ fn layerSurfaceConfigure(
     };
 }
 
-/// Frame callback handler. Clears the pending flag so the next timer event
-/// may render this surface.
+/// Frame callback handler releases callback ownership/readiness for later
+/// post-dispatch App scheduler reconciliation, which may render overdue, arm
+/// a retained absolute deadline, or remain disarmed.
 fn frameCallbackDone(
     data: ?*anyopaque,
     callback: ?*c.wl_callback,
@@ -581,7 +595,23 @@ fn frameCallbackDone(
     _ = time_ms;
     const self: *SurfaceState = @ptrCast(@alignCast(data));
 
-    c.wl_callback_destroy(callback);
+    var callback_destroy = ProductionCallbackDestroy{};
+    frameCallbackDoneWith(self, callback, ProductionCallbackDestroy, &callback_destroy);
+}
+
+const ProductionCallbackDestroy = struct {
+    fn destroy(_: *@This(), callback: ?*c.wl_callback) void {
+        c.wl_callback_destroy(callback);
+    }
+};
+
+fn frameCallbackDoneWith(
+    self: *SurfaceState,
+    callback: ?*c.wl_callback,
+    comptime CallbackDestroy: type,
+    callback_destroy: *CallbackDestroy,
+) void {
+    callback_destroy.destroy(callback);
     self.frame_callback = null;
 }
 
