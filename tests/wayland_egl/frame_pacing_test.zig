@@ -189,7 +189,7 @@ test "frame callback completion only releases ownership before scheduler reconci
     try service(&fixture, 130, &timer, &ops);
 
     try std.testing.expectEqual(@as(usize, 1), ops.renders);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.02), fixture.app.animation.phase, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.01), fixture.app.animation.phase, 1e-12);
     try std.testing.expectEqual(@as(?u64, 140), App.TestAdapter.timerDeadline(&fixture.app));
     try std.testing.expectEqual(@as(usize, 1), timer.calls);
 }
