@@ -13,3 +13,8 @@ zig-out/
 specs/
 appbreaker.md
 CLAUDE.md
+zig-linux-x86_64-0.13.0/
+zig-x86_64-linux-0.16.0/
+zig.tar.xz
+zig-cache/
+zig-out/
