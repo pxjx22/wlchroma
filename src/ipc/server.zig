@@ -77,6 +77,7 @@ pub const IpcServer = struct {
         if (socket_path.len >= addr.path.len) return error.PathTooLong;
         @memcpy(addr.path[0..socket_path.len], socket_path);
         try sys.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        try sys.setFileMode(fd, 0o600);
         bound = true;
         try sys.listen(fd, 8);
 
