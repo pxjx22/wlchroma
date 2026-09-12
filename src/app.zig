@@ -1193,71 +1193,85 @@ pub const App = struct {
                 break;
             };
 
-            const poll_terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
-            if (fds[0].revents & poll_terminal != 0) {
-                c.wl_display_cancel_read(self.display);
-                std.debug.print("Wayland socket HUP/ERR/NVAL, compositor disconnected\n", .{});
-                break;
-            }
-
-            if (fds[1].revents & poll_terminal != 0) {
-                c.wl_display_cancel_read(self.display);
-                std.debug.print("timerfd HUP/ERR/NVAL, exiting\n", .{});
-                break;
-            }
-
-            if (fds[0].revents & linux.POLL.IN != 0) {
-                if (c.wl_display_read_events(self.display) < 0) {
-                    std.debug.print("wl_display_read_events error\n", .{});
-                    break;
-                }
-            } else {
-                c.wl_display_cancel_read(self.display);
-            }
-
-            _ = c.wl_display_dispatch_pending(self.display);
-
-            // Reconcile surfaces with outputs that appeared in this batch.
-            self.syncSurfaces();
-            _ = self.ipcPollTimeout();
+            self.servicePollFds(&fds, ipc_role, reload_client_fd);
             if (!self.running) break;
 
-            if (fds[1].revents & linux.POLL.IN != 0) {
-                var reader = FrameTimerReader{};
-                self.consumeFrameTimerWith(FrameTimerReader, &reader);
-            }
-
-            if (fds[2].revents & linux.POLL.IN != 0) {
-                self.handleSignalEvent();
-            }
-            if (fds[2].revents & poll_terminal != 0) {
-                std.debug.print("signalfd HUP/ERR/NVAL, shutting down\n", .{});
-                self.running = false;
-            }
-
-            // Signal shutdown wins over accepting or mutating IPC state. Otherwise use
-            // the role captured before poll, even if accepting changes ipc_client.
-            if (self.running and ipc_role != .none) {
-                self.serviceIpcSlot(ipc_role, fds[3].revents);
-            }
-            if (self.running) {
-                if (reload_client_fd) |fd| self.serviceReloadClient(fd, fds[5].revents);
-            }
-            if (self.running) {
-                if (fds[4].revents & poll_terminal != 0) {
-                    if (self.reload_job) |job| {
-                        if (job.phase != .responding) job.notification_fault = true;
-                    }
-                }
-                const reload_ready = if (self.reload_job) |job|
-                    job.phase != .responding and job.readyAcquire()
-                else
-                    false;
-                if (fds[4].revents & (linux.POLL.IN | poll_terminal) != 0 or reload_ready) {
-                    self.serviceReloadReady();
-                }
-            }
             if (self.running) self.serviceFrameSchedule();
+        }
+    }
+
+    fn servicePollFds(
+        self: *App,
+        fds: *[6]posix.pollfd,
+        ipc_role: IpcPollRole,
+        reload_client_fd: ?posix.fd_t,
+    ) void {
+        const poll_terminal = linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL;
+        if (fds[0].revents & poll_terminal != 0) {
+            c.wl_display_cancel_read(self.display);
+            std.debug.print("Wayland socket HUP/ERR/NVAL, compositor disconnected\n", .{});
+            self.running = false;
+            return;
+        }
+
+        if (fds[1].revents & poll_terminal != 0) {
+            c.wl_display_cancel_read(self.display);
+            std.debug.print("timerfd HUP/ERR/NVAL, exiting\n", .{});
+            self.running = false;
+            return;
+        }
+
+        if (fds[0].revents & linux.POLL.IN != 0) {
+            if (c.wl_display_read_events(self.display) < 0) {
+                std.debug.print("wl_display_read_events error\n", .{});
+                self.running = false;
+                return;
+            }
+        } else {
+            c.wl_display_cancel_read(self.display);
+        }
+
+        _ = c.wl_display_dispatch_pending(self.display);
+
+        // Reconcile surfaces with outputs that appeared in this batch.
+        self.syncSurfaces();
+        _ = self.ipcPollTimeout();
+        if (!self.running) return;
+
+        if (fds[1].revents & linux.POLL.IN != 0) {
+            var reader = FrameTimerReader{};
+            self.consumeFrameTimerWith(FrameTimerReader, &reader);
+        }
+
+        if (fds[2].revents & linux.POLL.IN != 0) {
+            self.handleSignalEvent();
+        }
+        if (fds[2].revents & poll_terminal != 0) {
+            std.debug.print("signalfd HUP/ERR/NVAL, shutting down\n", .{});
+            self.running = false;
+        }
+
+        // Signal shutdown wins over accepting or mutating IPC state. Otherwise use
+        // the role captured before poll, even if accepting changes ipc_client.
+        if (self.running and ipc_role != .none) {
+            self.serviceIpcSlot(ipc_role, fds[3].revents);
+        }
+        if (self.running) {
+            if (reload_client_fd) |fd| self.serviceReloadClient(fd, fds[5].revents);
+        }
+        if (self.running) {
+            if (fds[4].revents & poll_terminal != 0) {
+                if (self.reload_job) |job| {
+                    if (job.phase != .responding) job.notification_fault = true;
+                }
+            }
+            const reload_ready = if (self.reload_job) |job|
+                job.phase != .responding and job.readyAcquire()
+            else
+                false;
+            if (fds[4].revents & (linux.POLL.IN | poll_terminal) != 0 or reload_ready) {
+                self.serviceReloadReady();
+            }
         }
     }
 
