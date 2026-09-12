@@ -13,3 +13,5 @@ zig-out/
 specs/
 appbreaker.md
 CLAUDE.md
+zig-linux-x86_64-*
+zig-x86_64-linux-*

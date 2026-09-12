@@ -279,42 +279,52 @@ const SeenNames = struct {
     }
 };
 
-const SeenKey = struct {
-    section_name: []const u8,
-    key: []const u8,
-};
-
 const SeenKeys = struct {
-    buf: [MAX_SEEN_KEYS]SeenKey,
-    len: usize,
+    map: std.StringHashMap(void),
 
-    fn contains(self: *const SeenKeys, section_name: []const u8, key: []const u8) bool {
-        for (self.buf[0..self.len]) |seen| {
-            if (std.mem.eql(u8, seen.section_name, section_name) and std.mem.eql(u8, seen.key, key)) return true;
+    fn init(allocator: std.mem.Allocator) SeenKeys {
+        return .{ .map = std.StringHashMap(void).init(allocator) };
+    }
+
+    fn deinit(self: *SeenKeys) void {
+        var iter = self.map.keyIterator();
+        while (iter.next()) |k| {
+            self.map.allocator.free(k.*);
         }
-        return false;
+        self.map.deinit();
     }
 
     fn add(self: *SeenKeys, section_name: []const u8, key: []const u8) !void {
-        if (self.contains(section_name, key)) return error.DuplicateConfigEntry;
-        if (self.len >= self.buf.len) return error.MalformedConfig;
-        self.buf[self.len] = .{ .section_name = section_name, .key = key };
-        self.len += 1;
+        // If it already exists, the full key allocation isn't strictly necessary for checking,
+        // but since checking without allocating would require a custom hash context (or string hashing
+        // and matching manually), we just format the full key.
+        const full_key = try std.fmt.allocPrint(self.map.allocator, "{s}.{s}", .{ section_name, key });
+        errdefer self.map.allocator.free(full_key);
+
+        if (self.map.contains(full_key)) {
+            return error.DuplicateConfigEntry;
+        }
+        if (self.map.count() >= MAX_SEEN_KEYS) {
+            return error.MalformedConfig;
+        }
+
+        try self.map.put(full_key, {});
     }
 };
 
-fn parseAndValidate(content: []const u8) ParseError!AppConfig {
-    return (try parseDocument(content)).config;
+fn parseAndValidate(allocator: std.mem.Allocator, content: []const u8) (ParseError || std.mem.Allocator.Error)!AppConfig {
+    return (try parseDocument(allocator, content)).config;
 }
 
-fn parseDocument(content: []const u8) ParseError!ParsedDocument {
-    return parseDocumentObserved(content, null);
+fn parseDocument(allocator: std.mem.Allocator, content: []const u8) (ParseError || std.mem.Allocator.Error)!ParsedDocument {
+    return parseDocumentObserved(allocator, content, null);
 }
 
 fn parseDocumentObserved(
+    allocator: std.mem.Allocator,
     content: []const u8,
     line_visits: ?*usize,
-) ParseError!ParsedDocument {
+) (ParseError || std.mem.Allocator.Error)!ParsedDocument {
     try validateDocumentBytes(content);
 
     var document = ParsedDocument{
@@ -327,7 +337,8 @@ fn parseDocumentObserved(
     var section: Section = .top;
     var section_name: []const u8 = "";
     var seen_sections = SeenNames{ .buf = undefined, .len = 0 };
-    var seen_keys = SeenKeys{ .buf = undefined, .len = 0 };
+    var seen_keys = SeenKeys.init(allocator);
+    defer seen_keys.deinit();
     var seen_palette_names = SeenNames{ .buf = undefined, .len = 0 };
     var current_palette = std.mem.zeroes(NamedPalette);
     var palette_active = false;
@@ -603,7 +614,7 @@ fn parseAndValidateFull(
     allocator: std.mem.Allocator,
     content: []const u8,
 ) (ParseError || std.mem.Allocator.Error)!LoadResult {
-    const document = try parseDocument(content);
+    const document = try parseDocument(allocator, content);
     const palettes = try allocator.dupe(NamedPalette, document.palettes[0..document.palette_count]);
     return .{ .config = document.config, .palettes = palettes };
 }
@@ -838,7 +849,7 @@ test "parseHexColor invalid" {
 }
 
 test "parseAndValidate defaults" {
-    const cfg = try parseAndValidate("");
+    const cfg = try parseAndValidate(std.testing.allocator, "");
     const def = defaultConfig();
     try std.testing.expectEqual(def.fps, cfg.fps);
     try std.testing.expectEqual(def.palette[0].r, cfg.palette[0].r);
@@ -862,7 +873,7 @@ test "parseAndValidate full config" {
         \\[effect.settings]
         \\palette = ["#ff0000", "#00ff00", "#0000ff"]
     ;
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(@as(u32, 30), cfg.fps);
     try std.testing.expectEqual(@as(u32, 1_000_000_000 / 30), cfg.frame_interval_ns);
     try std.testing.expectEqual(@as(u8, 0xff), cfg.palette[0].r);
@@ -873,13 +884,13 @@ test "parseAndValidate full config" {
 
 test "parseAndValidate ignores version value" {
     const toml = "version = 3\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
 test "parseAndValidate version 2 accepted" {
     const toml = "version = 2\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
@@ -941,39 +952,39 @@ test "parseAndValidateFull rejects duplicate palette names" {
 
 test "parseAndValidate existing config does not require version" {
     const toml = "fps = 15\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(@as(u32, 15), cfg.fps);
 }
 
 test "parseAndValidate bad fps" {
     const toml = "fps = 0\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate fps too high" {
     const toml = "fps = 121\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate unsupported effect" {
     const toml = "[effect]\nname = \"fire\"\n";
-    try std.testing.expectError(error.UnsupportedEffect, parseAndValidate(toml));
+    try std.testing.expectError(error.UnsupportedEffect, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate unsupported policy" {
     const toml = "[outputs]\npolicy = \"manual\"\n";
-    try std.testing.expectError(error.UnsupportedPolicy, parseAndValidate(toml));
+    try std.testing.expectError(error.UnsupportedPolicy, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate comments" {
     const toml = "# A comment\nfps = 20 # inline comment\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(@as(u32, 20), cfg.fps);
 }
 
 test "parseAndValidate unknown keys and sections ignored" {
     const toml = "future_key = 42\n\n[unknown_section]\nfoo = \"bar\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     // Should return defaults without error
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
@@ -984,7 +995,7 @@ test "parseAndValidate duplicate top-level key fails" {
         \\fps = 15
         \\fps = 30
     ;
-    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate duplicate section fails" {
@@ -997,7 +1008,7 @@ test "parseAndValidate duplicate section fails" {
         \\[renderer]
         \\upscale_filter = "nearest"
     ;
-    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate repeated unknown sections are ignored" {
@@ -1010,7 +1021,7 @@ test "parseAndValidate repeated unknown sections are ignored" {
         \\[future]
         \\foo = 2
     ;
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
@@ -1022,7 +1033,7 @@ test "parseAndValidate duplicate unknown keys are ignored" {
         \\foo = 1
         \\foo = 2
     ;
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(defaultConfig().fps, cfg.fps);
 }
 
@@ -1035,23 +1046,23 @@ test "parseAndValidate duplicate unknown key in known section is ignored" {
         \\future = 2
         \\scale = 1.0
     ;
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
 }
 
 test "parseAndValidate renderer scale must be finite" {
     const toml = "[renderer]\nscale = inf\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate palette needs commas" {
     const toml = "[effect.settings]\npalette = [\"#ff0000\" \"#00ff00\", \"#0000ff\"]\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate quoted values reject trailing junk" {
     const toml = "[renderer]\nupscale_filter = \"nearest\" trailing\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseStringArray basic" {
@@ -1064,123 +1075,123 @@ test "parseStringArray basic" {
 
 test "parseAndValidate renderer scale" {
     const toml = "[renderer]\nscale = 0.5\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), cfg.renderer_scale, 0.001);
     try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
 }
 
 test "parseAndValidate renderer scale near one is rejected" {
     const toml = "[renderer]\nscale = 0.95\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate renderer upscale_filter linear" {
     const toml = "[renderer]\nupscale_filter = \"linear\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(UpscaleFilter.linear, cfg.upscale_filter);
 }
 
 test "parseAndValidate renderer scale too low" {
     const toml = "[renderer]\nscale = 0.05\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate renderer scale too high" {
     const toml = "[renderer]\nscale = 1.5\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate renderer invalid filter" {
     const toml = "[renderer]\nupscale_filter = \"bicubic\"\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate missing renderer section uses defaults" {
     const toml = "fps = 15\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.renderer_scale, 0.001);
     try std.testing.expectEqual(UpscaleFilter.nearest, cfg.upscale_filter);
 }
 
 test "parseAndValidate glass_drift effect" {
     const toml = "[effect]\nname = \"glass_drift\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.glass_drift, cfg.effect_type);
 }
 
 test "parseAndValidate frond_haze effect" {
     const toml = "[effect]\nname = \"frond_haze\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.frond_haze, cfg.effect_type);
 }
 
 test "parseAndValidate lumen_tunnel effect" {
     const toml = "[effect]\nname = \"lumen_tunnel\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.lumen_tunnel, cfg.effect_type);
 }
 
 test "parseAndValidate colormix effect explicit" {
     const toml = "[effect]\nname = \"colormix\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.colormix, cfg.effect_type);
 }
 
 test "parseAndValidate gyro_echo effect" {
     const toml = "[effect]\nname = \"gyro_echo\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.gyro_echo, cfg.effect_type);
 }
 
 test "parseAndValidate hex_floret effect" {
     const toml = "[effect]\nname = \"hex_floret\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.hex_floret, cfg.effect_type);
 }
 
 test "parseAndValidate dither_orb effect" {
     const toml = "[effect]\nname = \"dither_orb\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.dither_orb, cfg.effect_type);
 }
 
 test "parseAndValidate signal_matrix effect" {
     const toml = "[effect]\nname = \"signal_matrix\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.signal_matrix, cfg.effect_type);
 }
 
 test "parseAndValidate fract_lattice effect" {
     const toml = "[effect]\nname = \"fract_lattice\"\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(EffectType.fract_lattice, cfg.effect_type);
 }
 
 test "parseAndValidate speed valid min" {
     const toml = "[effect.settings]\nspeed = 0.25\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), cfg.speed, 0.001);
 }
 
 test "parseAndValidate speed valid max" {
     const toml = "[effect.settings]\nspeed = 2.5\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 2.5), cfg.speed, 0.001);
 }
 
 test "parseAndValidate speed too low" {
     const toml = "[effect.settings]\nspeed = 0.24\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate speed too high" {
     const toml = "[effect.settings]\nspeed = 2.51\n";
-    try std.testing.expectError(error.InvalidValue, parseAndValidate(toml));
+    try std.testing.expectError(error.InvalidValue, parseAndValidate(std.testing.allocator, toml));
 }
 
 test "parseAndValidate speed missing uses default" {
     const toml = "";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.speed, 0.001);
 }
 
@@ -1191,16 +1202,16 @@ test "parseAndValidate rejects invalid UTF-8 and disallowed controls" {
     const malformed_documents = [_][]const u8{ &invalid_utf8, &nul, &del };
 
     for (malformed_documents) |document| {
-        try std.testing.expectError(error.MalformedConfig, parseAndValidate(document));
+        try std.testing.expectError(error.MalformedConfig, parseAndValidate(std.testing.allocator, document));
     }
     try std.testing.expectError(
         error.MalformedConfig,
-        parseAndValidate("fps = 15\rscale = 1.0\n"),
+        parseAndValidate(std.testing.allocator, "fps = 15\rscale = 1.0\n"),
     );
 }
 
 test "parseAndValidate accepts horizontal tabs and CRLF" {
-    const cfg = try parseAndValidate("fps\t=\t30\r\n");
+    const cfg = try parseAndValidate(std.testing.allocator, "fps\t=\t30\r\n");
     try std.testing.expectEqual(@as(u32, 30), cfg.fps);
 }
 
@@ -1209,7 +1220,7 @@ test "parseAndValidate preserves opaque unknown and version values" {
         "version = \"future\\q#value\" # ignored\n" ++
         "future = \"opaque\\\"#pair\" # ignored\n" ++
         "fps = 30\n";
-    const cfg = try parseAndValidate(toml);
+    const cfg = try parseAndValidate(std.testing.allocator, toml);
     try std.testing.expectEqual(@as(u32, 30), cfg.fps);
 }
 
@@ -1274,7 +1285,7 @@ fn parseDocumentWithPaletteCount(palette_count: usize) !ParsedDocument {
             .{i},
         );
     }
-    return parseDocument(toml.items);
+    return parseDocument(std.testing.allocator, toml.items);
 }
 
 test "parseDocument accepts palette-count boundaries" {
@@ -1302,7 +1313,7 @@ test "parseDocument finalizes palettes at section transition and EOF" {
         "[[palettes]]\n" ++
         "name = \"two\"\n" ++
         "colors = [\"#111213\", \"#141516\", \"#171819\"]\n";
-    const document = try parseDocument(toml);
+    const document = try parseDocument(std.testing.allocator, toml);
     try std.testing.expectEqual(@as(usize, 2), document.palette_count);
     try std.testing.expectEqualStrings("one", document.palettes[0].nameSlice());
     try std.testing.expectEqualStrings("two", document.palettes[1].nameSlice());
@@ -1311,12 +1322,12 @@ test "parseDocument finalizes palettes at section transition and EOF" {
 
 test "parseDocument rejects incomplete palette before section transition" {
     const toml = "[[palettes]]\nname = \"one\"\n[renderer]\nscale = 0.5\n";
-    try std.testing.expectError(error.MalformedConfig, parseDocument(toml));
+    try std.testing.expectError(error.MalformedConfig, parseDocument(std.testing.allocator, toml));
 }
 
 test "parseDocument rejects incomplete palette at EOF" {
     const toml = "[[palettes]]\nname = \"one\"\n";
-    try std.testing.expectError(error.MalformedConfig, parseDocument(toml));
+    try std.testing.expectError(error.MalformedConfig, parseDocument(std.testing.allocator, toml));
 }
 
 test "parseDocument rejects duplicate keys in one repeated palette entry" {
@@ -1325,12 +1336,12 @@ test "parseDocument rejects duplicate keys in one repeated palette entry" {
         "name = \"one\"\n" ++
         "name = \"two\"\n" ++
         "colors = [\"#010203\", \"#040506\", \"#070809\"]\n";
-    try std.testing.expectError(error.DuplicateConfigEntry, parseDocument(toml));
+    try std.testing.expectError(error.DuplicateConfigEntry, parseDocument(std.testing.allocator, toml));
 }
 
 test "parseDocument visits each input line once" {
     const toml = "fps = 30\n[effect]\nname = \"colormix\"\n[[palettes]]\nname = \"one\"\ncolors = [\"#010203\", \"#040506\", \"#070809\"]";
     var line_visits: usize = 0;
-    _ = try parseDocumentObserved(toml, &line_visits);
+    _ = try parseDocumentObserved(std.testing.allocator, toml, &line_visits);
     try std.testing.expectEqual(@as(usize, 6), line_visits);
 }
