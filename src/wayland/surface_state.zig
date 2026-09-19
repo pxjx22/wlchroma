@@ -421,8 +421,12 @@ pub const SurfaceState = struct {
         const layout = try ShmLayout.init(extent);
         const wl_surface = self.layer_surface.wl_surface orelse return error.MissingWlSurface;
 
-        const new_grid = try self.allocator.alloc(defaults.Rgb, layout.grid.len);
-        errdefer self.allocator.free(new_grid);
+        var new_grid = self.cell_grid;
+        if (new_grid.len != layout.grid.len) {
+            new_grid = try self.allocator.alloc(defaults.Rgb, layout.grid.len);
+        }
+        errdefer if (new_grid.ptr != self.cell_grid.ptr) self.allocator.free(new_grid);
+
         var new_pool = try ShmPool.init(self.shm, layout);
         errdefer new_pool.deinit();
 
@@ -444,7 +448,9 @@ pub const SurfaceState = struct {
             self.frame_callback = null;
         }
         if (self.shm_pool) |*old_pool| old_pool.deinit();
-        if (self.cell_grid.len > 0) self.allocator.free(self.cell_grid);
+        if (self.cell_grid.ptr != new_grid.ptr and self.cell_grid.len > 0) {
+            self.allocator.free(self.cell_grid);
+        }
 
         self.shm_pool = new_pool;
         self.cell_grid = new_grid;
