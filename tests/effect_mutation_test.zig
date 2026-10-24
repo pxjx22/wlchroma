@@ -30,8 +30,8 @@ test "updatePalette applies new colors on every effect arm" {
         .{ .r = 0x44, .g = 0x55, .b = 0x66 },
         .{ .r = 0x77, .g = 0x88, .b = 0x99 },
     };
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        const cfg = configFor(@enumFromInt(field.value));
+    inline for (@typeInfo(EffectType).@"enum".field_values) |field_value| {
+        const cfg = configFor(@fromBackingInt(@intCast(field_value)));
         var eff = Effect.init(&cfg);
         eff.updatePalette(new_palette);
         if (eff.gpuPalette()) |colors| {
@@ -45,8 +45,8 @@ test "updatePalette applies new colors on every effect arm" {
 test "every GPU-only effect reports no CPU renderer without writing" {
     const grid = CellGridLayout{ .width = 1, .height = 1, .len = 1 };
     const sentinel = Rgb{ .r = 0xaa, .g = 0xbb, .b = 0xcc };
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        const effect_type: EffectType = @enumFromInt(field.value);
+    inline for (@typeInfo(EffectType).@"enum".field_values) |field_value| {
+        const effect_type: EffectType = @fromBackingInt(@intCast(field_value));
         if (effect_type != .colormix) {
             const cfg = configFor(effect_type);
             const eff = Effect.init(&cfg);
@@ -92,8 +92,8 @@ test "fallback preserves an existing colormix" {
 }
 
 test "fallback converts every GPU-only effect to colormix" {
-    inline for (@typeInfo(EffectType).@"enum".fields) |field| {
-        const effect_type: EffectType = @enumFromInt(field.value);
+    inline for (@typeInfo(EffectType).@"enum".field_values) |field_value| {
+        const effect_type: EffectType = @fromBackingInt(@intCast(field_value));
         if (effect_type != .colormix) {
             const cfg = configFor(effect_type);
             var eff = Effect.init(&cfg);

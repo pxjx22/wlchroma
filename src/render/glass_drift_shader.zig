@@ -196,7 +196,7 @@ pub const GlassDriftShader = struct {
     }
 
     pub fn draw(self: *const GlassDriftShader) void {
-        if (builtin.mode == .Debug) std.debug.assert(self.bound);
+        if (builtin.mode == .debug) std.debug.assert(self.bound);
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
     }
 

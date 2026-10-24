@@ -163,7 +163,7 @@ pub const StandardShader = struct {
     }
 
     pub fn draw(self: *const StandardShader) void {
-        if (builtin.mode == .Debug) std.debug.assert(self.bound);
+        if (builtin.mode == .debug) std.debug.assert(self.bound);
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
     }
 

@@ -119,17 +119,17 @@ test "parseLine: set-palette name with hyphens" {
 }
 
 test "parseLine: set-palette 63-char name (max)" {
-    const name = "a" ** PALETTE_NAME_MAX;
+    const name: [PALETTE_NAME_MAX]u8 = @splat('a');
     var line_buf: [128]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "set-palette {s}", .{name}) catch unreachable;
+    const line = std.fmt.bufPrint(&line_buf, "set-palette {s}", .{&name}) catch unreachable;
     const cmd = try parseLine(line);
-    try std.testing.expectEqualStrings(name, cmd.set_palette.nameSlice());
+    try std.testing.expectEqualStrings(&name, cmd.set_palette.nameSlice());
 }
 
 test "parseLine: set-palette 64-char name (too long) → BadArgument" {
-    const name = "a" ** (PALETTE_NAME_MAX + 1);
+    const name: [PALETTE_NAME_MAX + 1]u8 = @splat('a');
     var line_buf: [128]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "set-palette {s}", .{name}) catch unreachable;
+    const line = std.fmt.bufPrint(&line_buf, "set-palette {s}", .{&name}) catch unreachable;
     const result = parseLine(line);
     try std.testing.expectError(error.BadArgument, result);
 }

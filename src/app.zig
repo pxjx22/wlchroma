@@ -755,7 +755,7 @@ pub const App = struct {
         const ctx = if (self.egl_ctx) |*p| p else return;
         if (self.effect_shader != null or self.gpu_pipeline_failed) return;
 
-        const perf_logs_enabled = builtin.mode == .Debug;
+        const perf_logs_enabled = builtin.mode == .debug;
         var attempted = false;
 
         for (self.surfaces.items) |s| {
@@ -1640,10 +1640,10 @@ pub const App = struct {
             };
             switch (result) {
                 .signal => |info| switch (info.signo) {
-                    @intFromEnum(posix.SIG.INT),
-                    @intFromEnum(posix.SIG.TERM),
+                    @backingInt(posix.SIG.INT),
+                    @backingInt(posix.SIG.TERM),
                     => {
-                        const name = if (info.signo == @intFromEnum(posix.SIG.INT))
+                        const name = if (info.signo == @backingInt(posix.SIG.INT))
                             "SIGINT"
                         else
                             "SIGTERM";

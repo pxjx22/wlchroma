@@ -28,18 +28,20 @@ pub const IpcServer = struct {
             .path_buf = std.mem.zeroes([SUN_PATH_BYTES]u8),
             .path_len = 0,
         };
-        const socket_path = std.fmt.bufPrintZ(
+        const socket_path = std.mem.printSentinel(
             &server.path_buf,
             "{s}/wlchroma.sock",
             .{runtime_dir},
+            0,
         ) catch return error.PathTooLong;
         server.path_len = socket_path.len;
 
         var lock_path_buf = std.mem.zeroes([SUN_PATH_BYTES]u8);
-        const lock_path = std.fmt.bufPrintZ(
+        const lock_path = std.mem.printSentinel(
             &lock_path_buf,
             "{s}/wlchroma.lock",
             .{runtime_dir},
+            0,
         ) catch return error.PathTooLong;
         const lock_fd = try posix.openatZ(
             posix.AT.FDCWD,

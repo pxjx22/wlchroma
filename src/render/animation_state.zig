@@ -118,7 +118,7 @@ pub const AnimationState = struct {
     }
 
     fn assertValid(self: *const AnimationState) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             std.debug.assert(std.math.isFinite(self.phase));
             std.debug.assert(self.phase >= 0.0 and self.phase <= PHASE_LIMIT);
             if (self.phase == 0.0) std.debug.assert(self.direction == .forward);

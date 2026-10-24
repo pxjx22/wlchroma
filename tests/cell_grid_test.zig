@@ -58,7 +58,7 @@ test "colormix rejects short and oversized outputs before writing" {
     const grid = CellGridLayout{ .width = 2, .height = 2, .len = 4 };
     const colormix = renderer();
 
-    var short = [_]Rgb{sentinel} ** 3;
+    var short = @as([3]Rgb, @splat(sentinel));
     const short_before = short;
     try std.testing.expectError(
         error.OutputLengthMismatch,
@@ -66,7 +66,7 @@ test "colormix rejects short and oversized outputs before writing" {
     );
     try std.testing.expectEqualSlices(Rgb, &short_before, &short);
 
-    var oversized = [_]Rgb{sentinel} ** 5;
+    var oversized = @as([5]Rgb, @splat(sentinel));
     const oversized_before = oversized;
     try std.testing.expectError(
         error.OutputLengthMismatch,
@@ -78,7 +78,7 @@ test "colormix rejects short and oversized outputs before writing" {
 test "colormix rejects fabricated grid metadata before writing" {
     const bad_grid = CellGridLayout{ .width = 2, .height = 2, .len = 3 };
     const colormix = renderer();
-    var output = [_]Rgb{sentinel} ** 3;
+    var output = @as([3]Rgb, @splat(sentinel));
     const before = output;
 
     try std.testing.expectError(

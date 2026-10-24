@@ -150,7 +150,7 @@ test "eventfd read rejects a short native token" {
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
     defer ipc.sys.close(fds[0]);
     defer ipc.sys.close(fds[1]);
-    const half = [_]u8{0xa5} ** 4;
+    const half = @as([4]u8, @splat(0xa5));
     try std.testing.expectEqual(@as(usize, half.len), linux.write(fds[1], &half, half.len));
     try std.testing.expectError(error.ShortRead, ipc.sys.eventfdRead(fds[0]));
 }

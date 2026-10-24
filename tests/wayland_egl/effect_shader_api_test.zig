@@ -19,6 +19,6 @@ test "effect and leaf shaders expose only split state operations" {
 
 test "effect shader receives plain animation time" {
     const info = @typeInfo(@TypeOf(wayland.effect_shader.EffectShader.setUniforms)).@"fn";
-    try std.testing.expectEqual(@as(usize, 4), info.params.len);
-    try std.testing.expect(info.params[1].type.? == f32);
+    try std.testing.expectEqual(@as(usize, 4), info.param_types.len);
+    try std.testing.expect(info.param_types[1].? == f32);
 }

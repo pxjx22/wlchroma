@@ -52,7 +52,7 @@ test "framebuffer rejects short and oversized cell slices before writing" {
     const pixels = try std.testing.allocator.alloc(u8, layout.buffer_bytes);
     defer std.testing.allocator.free(pixels);
 
-    const short = [_]Rgb{cell_sentinel} ** 3;
+    const short = @as([3]Rgb, @splat(cell_sentinel));
     @memset(pixels, pixel_sentinel);
     try std.testing.expectError(
         error.CellLengthMismatch,
@@ -60,7 +60,7 @@ test "framebuffer rejects short and oversized cell slices before writing" {
     );
     for (pixels) |byte| try std.testing.expectEqual(pixel_sentinel, byte);
 
-    const oversized = [_]Rgb{cell_sentinel} ** 5;
+    const oversized = @as([5]Rgb, @splat(cell_sentinel));
     @memset(pixels, pixel_sentinel);
     try std.testing.expectError(
         error.CellLengthMismatch,
@@ -71,7 +71,7 @@ test "framebuffer rejects short and oversized cell slices before writing" {
 
 test "framebuffer rejects short and oversized pixel slices before writing" {
     const layout = try layout2x2();
-    const cells = [_]Rgb{cell_sentinel} ** 4;
+    const cells = @as([4]Rgb, @splat(cell_sentinel));
 
     const short = try std.testing.allocator.alloc(u8, layout.buffer_bytes - 1);
     defer std.testing.allocator.free(short);
@@ -95,7 +95,7 @@ test "framebuffer rejects short and oversized pixel slices before writing" {
 test "framebuffer rejects fabricated SHM grid before writing" {
     var layout = try layout2x2();
     layout.grid.len -= 1;
-    const cells = [_]Rgb{cell_sentinel} ** 4;
+    const cells = @as([4]Rgb, @splat(cell_sentinel));
     const pixels = try std.testing.allocator.alloc(u8, layout.buffer_bytes);
     defer std.testing.allocator.free(pixels);
     @memset(pixels, pixel_sentinel);
