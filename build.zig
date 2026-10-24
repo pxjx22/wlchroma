@@ -66,6 +66,11 @@ pub fn build(b: *std.Build) void {
     });
     translate_c.addIncludePath(hdr.dirname());
     translate_c.addIncludePath(xdg_hdr.dirname());
+    // Match the daemon's dependency headers, including pkg-config prefixes.
+    translate_c.linkSystemLibrary("wayland-client", .{});
+    translate_c.linkSystemLibrary("EGL", .{});
+    translate_c.linkSystemLibrary("GLESv2", .{});
+    translate_c.linkSystemLibrary("wayland-egl", .{});
     const c_mod = translate_c.createModule();
 
     // Raw-syscall shim shared by the daemon and the IPC test modules.
