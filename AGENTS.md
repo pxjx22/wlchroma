@@ -17,8 +17,9 @@ Committed guidance: `README.md` (user-visible behavior), `CONTRIBUTING.md` (proc
 
 ## Toolchain gotchas
 
-- Zig is pinned to **0.16.0** (`.zig-version`, CI, and `build.zig.zon`). Do not upgrade without a deliberate decision.
-- The code uses Zig 0.16 std APIs: `pub fn main(init: std.process.Init)`, `init.gpa`, `init.io`, `init.minimal.args`. Patterns from ≤0.15 (manual GeneralPurposeAllocator setup, `std.process.args()`) will not compile — copy existing style.
+- Zig is pinned to **0.17.0** (`.zig-version`, CI, and `build.zig.zon`). Do not upgrade without a deliberate decision.
+- The code uses Zig 0.16+ std APIs: `pub fn main(init: std.process.Init)`, `init.gpa`, `init.io`, `init.minimal.args`. Patterns from ≤0.15 (manual GeneralPurposeAllocator setup, `std.process.args()`) will not compile — copy existing style.
+- Zig 0.17 removed `@cImport`: C bindings come from `b.addTranslateC` on `src/c.h` (module `c`, re-exported by `src/wl.zig`); new C headers go in `src/c.h`, and any module that reaches `wl.zig` needs `addImport("c", c_mod)`. Also gone: `b.args` (use `run_cmd.addPassthruArgs()`), the `**` array-repeat operator (use `@as([N]T, @splat(x))`), `std.fmt.bufPrintZ` (use `std.mem.printSentinel`), `builtin.mode == .Debug` (now `.debug`), and `Type.Enum.fields` / `Type.Fn.params` (now `field_names`/`field_values` / `param_types`).
 - `wayland-scanner` generates C bindings from `protocols/*.xml` at build time (into the zig cache). `protocols/` holds vendored upstream XML only — don't hand-edit it, never commit generated C.
 - System deps: dev packages for `wayland-client`, `wayland-egl`, `EGL`, `GLESv2`, plus `wayland-scanner`.
 
