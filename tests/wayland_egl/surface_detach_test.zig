@@ -136,12 +136,12 @@ test "surface owns change-driven CPU stand-in state" {
 
 test "render tick receives mutable shader and app upload state" {
     const info = @typeInfo(@TypeOf(SurfaceState.renderTick)).@"fn";
-    try std.testing.expectEqual(@as(usize, 4), info.params.len);
+    try std.testing.expectEqual(@as(usize, 4), info.param_types.len);
     try std.testing.expect(
-        info.params[1].type.? == ?*wayland.effect_shader.EffectShader,
+        info.param_types[1].? == ?*wayland.effect_shader.EffectShader,
     );
     try std.testing.expect(
-        info.params[2].type.? ==
+        info.param_types[2].? ==
             *wayland.gpu_upload_state.GpuUploadState,
     );
 }

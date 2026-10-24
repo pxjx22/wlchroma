@@ -57,6 +57,22 @@ pub fn build(b: *std.Build) void {
     xdg_scan_src.addFileArg(xdg_xml);
     const xdg_src = xdg_scan_src.addOutputFileArg("xdg-shell-client-protocol.c");
 
+    // C bindings for libwayland/EGL/GLES (Zig 0.17 removed @cImport).
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    translate_c.addIncludePath(hdr.dirname());
+    translate_c.addIncludePath(xdg_hdr.dirname());
+    // Match the daemon's dependency headers, including pkg-config prefixes.
+    translate_c.linkSystemLibrary("wayland-client", .{});
+    translate_c.linkSystemLibrary("EGL", .{});
+    translate_c.linkSystemLibrary("GLESv2", .{});
+    translate_c.linkSystemLibrary("wayland-egl", .{});
+    const c_mod = translate_c.createModule();
+
     // Raw-syscall shim shared by the daemon and the IPC test modules.
     const sys_mod = b.createModule(.{
         .root_source_file = b.path("src/sys.zig"),
@@ -72,6 +88,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.addImport("sys", sys_mod);
+    mod.addImport("c", c_mod);
     mod.addOptions("build_options", daemon_options);
 
     mod.addCSourceFile(.{ .file = src, .flags = &.{} });
@@ -92,9 +109,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the wallpaper daemon");
     run_step.dependOn(&run_cmd.step);
 
@@ -203,6 +218,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     src_exports_mod.addImport("sys", sys_mod);
+    src_exports_mod.addImport("c", c_mod);
     src_exports_mod.addOptions("build_options", daemon_options);
 
     const cpu_bench_sys_mod = b.createModule(.{
@@ -216,6 +232,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     cpu_bench_src_mod.addImport("sys", cpu_bench_sys_mod);
+    cpu_bench_src_mod.addImport("c", c_mod);
     cpu_bench_src_mod.addOptions("build_options", daemon_options);
     const cpu_bench_mod = b.createModule(.{
         .root_source_file = b.path("bench/cpu_path.zig"),
@@ -247,6 +264,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     wayland_exports_mod.addImport("sys", sys_mod);
+    wayland_exports_mod.addImport("c", c_mod);
     wayland_exports_mod.addOptions("build_options", daemon_options);
     wayland_exports_mod.addCSourceFile(.{ .file = src, .flags = &.{} });
     wayland_exports_mod.addCSourceFile(.{ .file = xdg_src, .flags = &.{} });

@@ -117,7 +117,7 @@ pub const BlitShader = struct {
     /// Binds the blit program, sets up the texture, draws, then restores
     /// the colormix program so subsequent frames work without re-binding.
     pub fn draw(self: *const BlitShader, tex: c.GLuint, effect_program: c.GLuint, effect_vbo: c.GLuint, effect_a_pos: c.GLuint) void {
-        if (builtin.mode == .Debug) std.debug.assert(self.bound);
+        if (builtin.mode == .debug) std.debug.assert(self.bound);
 
         // Switch to blit program
         c.glUseProgram(self.program);

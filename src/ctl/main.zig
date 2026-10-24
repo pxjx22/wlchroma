@@ -88,7 +88,7 @@ fn run(args_source: std.process.Args, environ: std.process.Environ) !void {
         std.process.exit(1);
     };
     var path_buf: [SOCK_PATH_MAX:0]u8 = std.mem.zeroes([SOCK_PATH_MAX:0]u8);
-    const sock_path = std.fmt.bufPrintZ(&path_buf, "{s}/wlchroma.sock", .{runtime_dir}) catch {
+    const sock_path = std.mem.printSentinel(&path_buf, "{s}/wlchroma.sock", .{runtime_dir}, 0) catch {
         writeErr("error: socket path too long\n", .{});
         std.process.exit(1);
     };

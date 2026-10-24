@@ -3,7 +3,7 @@ const decode = @import("wlchroma_src").timer_expirations.decode;
 
 test "timer expiration decoder requires exactly eight bytes" {
     try std.testing.expectError(error.ShortRead, decode(&.{ 1, 2, 3, 4 }));
-    try std.testing.expectError(error.LongRead, decode(&([_]u8{0} ** 9)));
+    try std.testing.expectError(error.LongRead, decode(&@as([9]u8, @splat(0))));
 }
 
 test "timer expiration decoder uses native endian u64" {

@@ -55,7 +55,7 @@ test "request accumulator accepts the exact 4096 byte wire limit" {
 }
 
 test "request accumulator rejects 4096 payload bytes without newline" {
-    const wire = [_]u8{'a'} ** connection.REQUEST_MAX;
+    const wire = @as([connection.REQUEST_MAX]u8, @splat('a'));
     var request = connection.RequestAccumulator{};
     try std.testing.expect(request.feed(&wire) == .line_too_long);
 }
@@ -107,7 +107,7 @@ test "response queue rejects invalid write progress" {
 
 test "response queue fails closed on overflow" {
     var response = connection.ResponseQueue{};
-    const oversized = [_]u8{'x'} ** connection.RESPONSE_MAX;
+    const oversized = @as([connection.RESPONSE_MAX]u8, @splat('x'));
     response.appendLine(&oversized);
     response.appendLine("ok");
     try std.testing.expectEqualStrings("error: internal\n", response.pending());
@@ -117,7 +117,7 @@ test "response queue never rewinds after partial transmission" {
     var response = connection.ResponseQueue{};
     response.appendLine("ok");
     try response.consume(1);
-    const oversized = [_]u8{'x'} ** connection.RESPONSE_MAX;
+    const oversized = @as([connection.RESPONSE_MAX]u8, @splat('x'));
     response.appendLine(&oversized);
     try std.testing.expect(response.failed_closed);
     try std.testing.expect(response.isComplete());
@@ -160,7 +160,7 @@ fn sendExact(fd: posix.fd_t, bytes: []const u8) !void {
 }
 
 fn fillUntilWouldBlock(fd: posix.fd_t) !void {
-    const filler = [_]u8{0xa5} ** 4096;
+    const filler = @as([4096]u8, @splat(0xa5));
     for (0..4096) |_| {
         _ = sys.sendNoSignal(fd, &filler) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -320,7 +320,7 @@ test "sendNoSignal survives a closed peer with default SIGPIPE behavior" {
     if (linux.errno(fork_rc) != .SUCCESS) return error.TestForkFailed;
     if (fork_rc == 0) sigpipeChild();
 
-    var status: u32 = 0;
+    var status: i32 = 0;
     while (true) {
         const wait_rc = linux.waitpid(@intCast(fork_rc), &status, 0);
         switch (linux.errno(wait_rc)) {
@@ -329,8 +329,8 @@ test "sendNoSignal survives a closed peer with default SIGPIPE behavior" {
             else => return error.TestWaitFailed,
         }
     }
-    try std.testing.expect(posix.W.IFEXITED(status));
-    try std.testing.expectEqual(@as(u8, 0), posix.W.EXITSTATUS(status));
+    try std.testing.expect(posix.W.IFEXITED(@bitCast(status)));
+    try std.testing.expectEqual(@as(u8, 0), posix.W.EXITSTATUS(@bitCast(status)));
 }
 
 test "dispatch response helpers build the query wire format" {

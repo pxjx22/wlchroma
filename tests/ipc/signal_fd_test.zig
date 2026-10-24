@@ -26,7 +26,7 @@ test "readOne decodes only a complete signalfd record" {
     defer sys.close(fds[0]);
     defer sys.close(fds[1]);
     var info = std.mem.zeroes(linux.signalfd_siginfo);
-    info.signo = @intFromEnum(posix.SIG.INT);
+    info.signo = @backingInt(posix.SIG.INT);
     try sendExact(fds[1], std.mem.asBytes(&info));
     switch (try signal_fd.readOne(fds[0])) {
         .signal => |actual| try std.testing.expectEqual(info.signo, actual.signo),
