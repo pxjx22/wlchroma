@@ -132,6 +132,9 @@ Palette names must be unique and contain 1–63 UTF-8 bytes. The initial colors 
 ## Runtime Control
 
 `wlchroma` exposes a Unix domain socket at `$XDG_RUNTIME_DIR/wlchroma.sock` using a line-based text protocol.
+The socket pathname is set to mode `0600` before listening so only its owner
+(and privileged processes) can connect, regardless of the process umask.
+`XDG_RUNTIME_DIR` must remain private to the user, as required by XDG.
 
 ### wlchroma-ctl
 

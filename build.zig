@@ -182,6 +182,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ipc_server_tests.step);
     ipc_test_step.dependOn(&run_ipc_server_tests.step);
 
+    const ipc_server_unit_mod = b.createModule(.{
+        .root_source_file = b.path("src/ipc/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_server_unit_mod.addImport("sys", sys_mod);
+    const ipc_server_unit_tests = b.addTest(.{
+        .root_module = ipc_server_unit_mod,
+    });
+    const run_ipc_server_unit_tests = b.addRunArtifact(ipc_server_unit_tests);
+    test_step.dependOn(&run_ipc_server_unit_tests.step);
+    ipc_test_step.dependOn(&run_ipc_server_unit_tests.step);
+
     const signal_fd_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/ipc/signal_fd_test.zig"),
         .target = target,
