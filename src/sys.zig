@@ -145,6 +145,18 @@ pub fn setFileMode(fd: fd_t, mode: std.posix.mode_t) error{SetFileModeFailed}!vo
     }
 }
 
+/// Change the filesystem inode's mode; fchmod on a socket fd changes only the
+/// socket inode, not the pathname through which clients connect.
+pub fn setPathModeZ(path: [*:0]const u8, mode: std.posix.mode_t) error{SetFileModeFailed}!void {
+    while (true) {
+        switch (linux.errno(linux.chmod(path, mode))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.SetFileModeFailed,
+        }
+    }
+}
+
 pub fn write(fd: fd_t, data: []const u8) !usize {
     const rc = linux.write(fd, data.ptr, data.len);
     if (linux.errno(rc) != .SUCCESS) return error.WriteFailed;

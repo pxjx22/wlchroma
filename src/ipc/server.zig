@@ -20,6 +20,13 @@ pub const IpcServer = struct {
     }
 
     pub fn initAtRuntimeDir(runtime_dir: []const u8) !IpcServer {
+        return initAtRuntimeDirWithModeSetter(runtime_dir, sys.setPathModeZ);
+    }
+
+    fn initAtRuntimeDirWithModeSetter(
+        runtime_dir: []const u8,
+        comptime set_mode: fn ([*:0]const u8, posix.mode_t) error{SetFileModeFailed}!void,
+    ) !IpcServer {
         if (runtime_dir.len == 0) return error.NoRuntimeDir;
 
         var server = IpcServer{
@@ -80,6 +87,9 @@ pub const IpcServer = struct {
         @memcpy(addr.path[0..socket_path.len], socket_path);
         try sys.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
         bound = true;
+        // The XDG runtime directory is private to the user. Restrict the bound
+        // pathname before listening, without changing the process-wide umask.
+        try set_mode(socket_path, 0o600);
         try sys.listen(fd, 8);
 
         server.fd = fd;
@@ -104,3 +114,27 @@ pub const IpcServer = struct {
         sys.close(self.lock_fd);
     }
 };
+
+test "socket mode failure removes the bound path and releases the lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const runtime_dir = path_buf[0..path_len];
+    const fail_mode = struct {
+        fn set(_: [*:0]const u8, _: posix.mode_t) error{SetFileModeFailed}!void {
+            return error.SetFileModeFailed;
+        }
+    }.set;
+
+    try std.testing.expectError(
+        error.SetFileModeFailed,
+        IpcServer.initAtRuntimeDirWithModeSetter(runtime_dir, fail_mode),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "wlchroma.sock", .{}),
+    );
+    var recovered = try IpcServer.initAtRuntimeDir(runtime_dir);
+    defer recovered.deinit();
+}

@@ -59,6 +59,29 @@ test "server listener and lock have atomic fd flags" {
     );
 }
 
+test "server socket pathname is owner-only regardless of umask" {
+    const previous_umask = linux.syscall1(.umask, 0);
+    defer _ = linux.syscall1(.umask, previous_umask);
+
+    for ([_]usize{ 0o000, 0o777 }) |mask| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const runtime_dir = try runtimeDir(&tmp, &path_buf);
+        _ = linux.syscall1(.umask, mask);
+        var server = try IpcServer.initAtRuntimeDir(runtime_dir);
+        defer server.deinit();
+
+        const stat = try tmp.dir.statFile(std.testing.io, "wlchroma.sock", .{});
+        try std.testing.expectEqual(
+            @as(posix.mode_t, 0o600),
+            stat.permissions.toMode() & 0o777,
+        );
+        const peer_fd = try connectTo(server.socketPath());
+        sys.close(peer_fd);
+    }
+}
+
 test "second server cannot replace the first socket and clean restart works" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
